@@ -1,0 +1,14 @@
+# Dependencias
+node_modules/
+
+# Builds
+dist/
+build/
+
+# Entornos
+.env
+.env.*
+
+# Caches de Puppeteer/Chromium (por si acaso)
+**/.local-chromium/
+**/.cache/puppeteer/
