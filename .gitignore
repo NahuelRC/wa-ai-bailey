@@ -20,4 +20,4 @@ scripts/
 /auth
 /.wadata
 .env
-public/qr.png
+public/qr.png.env
