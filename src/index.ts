@@ -1,16 +1,36 @@
-import { cfg } from './config';
-import { createRoutes } from './routes';
-import { createWA } from './wa';
+import { cfg } from './config.js';
+import { createRoutes } from './routes.js';
+import { iniciarWhatsApp } from './wa.js';
+import * as path from 'path';
+import * as fs from 'fs';
+import { acquireProcessLock, releaseProcessLock } from './lock.js';
 
-async function main() {
-  const app = createRoutes();
-  app.listen(cfg.PORT, () => console.log(`🌐 HTTP en :${cfg.PORT} | /health | /qr`));
-
-  const wa = createWA();
-  await wa.initialize();
+function resolveSessionDir() {
+  const envDir = process.env.WA_SESSION_DIR;
+  if (envDir && envDir.trim()) return envDir.trim();
+  return path.join(process.cwd(), '.wadata'); // para el lock
 }
 
-main().catch(err => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+async function main() {
+  const sessionDir = resolveSessionDir();
+  fs.mkdirSync(sessionDir, { recursive: true });
+  console.log(`[SESSION] usando carpeta: ${sessionDir}`);
+
+  const { ok, lockPath } = acquireProcessLock(sessionDir);
+  if (!ok) {
+    console.error('Ya hay otra instancia usando esta sesión. Cerrando.');
+    process.exit(1);
+  }
+  const release = () => { try { releaseProcessLock(lockPath); } catch {} };
+  process.on('exit', release);
+  process.on('SIGINT', () => { release(); process.exit(0); });
+  process.on('SIGTERM', () => { release(); process.exit(0); });
+
+  const app = createRoutes();
+  app.listen(cfg.PORT, () => console.log(`🌐 HTTP en :${cfg.PORT} | /health`));
+
+  await iniciarWhatsApp();
+  console.log('🤖 Bot WhatsApp iniciado con Baileys');
+}
+
+main().catch(err => { console.error('Fatal:', err); process.exit(1); });

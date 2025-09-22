@@ -1,31 +1,36 @@
 {
-  "name": "wa-ai-bot",
+  "name": "wa-ai-bot-baileys",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "WhatsApp bot con Baileys + OpenAI",
+  "type": "module",
+  "main": "dist/index.js",
   "scripts": {
-    "dev": "ts-node src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "dotenv": "^17.2.2",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.8",
+    "dotenv": "^16.4.5",
     "express": "^5.1.0",
     "node-fetch": "^3.3.2",
-    "puppeteer": "^24.21.0",
+    "openai": "^4.58.1",
+    "pino": "^9.3.2",
     "qrcode": "^1.5.4",
-    "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.34.1"
+    "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
-    "@types/node": "^24.5.0",
+    "@types/node": "^20.14.10",
     "@types/qrcode": "^1.5.5",
-    "force": "^0.0.3",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/qs": "^6.14.0",
+    "@types/range-parser": "^1.2.7",
+    "@types/send": "^0.17.5",
+    "@types/serve-static": "^1.15.8",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "tsx": "^4.20.5",
+    "typescript": "^5.4.5"
   }
 }

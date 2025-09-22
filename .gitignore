@@ -8,7 +8,16 @@ build/
 # Entornos
 .env
 .env.*
+.wadata
 
 # Caches de Puppeteer/Chromium (por si acaso)
 **/.local-chromium/
 **/.cache/puppeteer/
+public/qr.png
+
+scripts/
+
+/auth
+/.wadata
+.env
+public/qr.png
