@@ -16,7 +16,7 @@ export const cfg = {
   // Imágenes (mantengo tus nombres)
   IMG1: process.env.IMG1_URL ?? '',
   IMG2: process.env.IMG2_URL ?? '',
-  IMG3: process.env.IMG3_URL ?? '',
+  IMG3: process.env.IMG3_URL ?? '' ,
 
   // Otros (opcionales)
   ADMIN_WHITELIST: (process.env.ADMIN_WHITELIST ?? '')

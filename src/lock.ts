@@ -6,7 +6,7 @@ export function acquireProcessLock(dir: string) {
   const lockPath = path.join(dir, 'process.lock');
   try {
     if (fs.existsSync(lockPath)) {
-      return { ok: false, lockPath };
+      return { ok: false, lockPath } ;
     }
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
     return { ok: true, lockPath };

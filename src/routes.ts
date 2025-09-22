@@ -3,7 +3,7 @@ import express from 'express';
 import path from 'path';
 
 export function createRoutes() {
-  const app = express();
+  const app = express() ;
 
   app.get('/health', (_req, res) => res.send('ok'));
 

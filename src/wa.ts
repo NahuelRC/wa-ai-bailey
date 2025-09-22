@@ -1,6 +1,6 @@
 import makeWASocket, {
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
+  fetchLatestBaileysVersion ,
   DisconnectReason,
   jidNormalizedUser,
   proto

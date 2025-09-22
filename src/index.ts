@@ -3,7 +3,7 @@ import { createRoutes } from './routes.js';
 import { iniciarWhatsApp } from './wa.js';
 import * as path from 'path';
 import * as fs from 'fs';
-import { acquireProcessLock, releaseProcessLock } from './lock.js';
+import { acquireProcessLock, releaseProcessLock } from './lock.js' ;
 
 function resolveSessionDir() {
   const envDir = process.env.WA_SESSION_DIR;

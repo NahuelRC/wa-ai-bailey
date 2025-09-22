@@ -63,7 +63,7 @@ export async function aiReply(userText: string, phone: string) {
 - Evitar ayunos largos. Hacer 4–6 ingestas pequeñas diarias.
 - Evitar combinaciones pesadas (pasta con carne, carne con papas).
 - Caminar diariamente.
-- Mantener snacks saludables.
+- Mantener snacks saludables .
 
 ✅ Datos para el pedido:
 - Nombre y apellido, Dirección, CP y ciudad, Teléfono.
