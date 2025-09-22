@@ -1,36 +1,84 @@
+// src/wa.ts
 import makeWASocket, {
   useMultiFileAuthState,
-  fetchLatestBaileysVersion ,
+  fetchLatestBaileysVersion,
   DisconnectReason,
   jidNormalizedUser,
   proto
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
+import fetch from 'node-fetch';
+import path from 'path';
 import { aiReply } from './ai.js';
 import { cfg } from './config.js';
-import QRCode from 'qrcode';
-import * as fs from 'fs';
-import * as path from 'path';
+
+// ====== Helpers de texto/imagen ======
+function normalize(t: string) {
+  return (t || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function fetchImageBuffer(url: string, timeoutMs = 15000): Promise<Buffer> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'image/*,*/*;q=0.8'
+      }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arr = await res.arrayBuffer();
+    return Buffer.from(arr);
+  } finally {
+    clearTimeout(id);
+  }
+}
 
 // ====== Detección de solicitud de imagen ======
 type ImgKind = 'semillas' | 'capsulas' | 'gotas' | 'generic';
 
 function parseImageRequest(raw: string): ImgKind | null {
-  const t = (raw || '').toLowerCase().trim();
+  const t = normalize(raw);
 
-  // pedidos explícitos
-  const asked =
-    /(^|\b)(imagen|foto|mostrame|mandame|enviame|pasame)\b/.test(t) ||
-    /\b(ver|muestra|mostra)\b.*\b(foto|imagen)\b/.test(t);
+  const hasImageWord = /\b(imagen|imagenes|foto|fotos|picture|pic|photo|📸|🖼️)\b/.test(t);
+  const hasAskVerb   = /\b(mostrar|mostrame|mostra|manda|mandame|enviar|enviame|pasa|pasame|ver|quiero|podria|podrias|necesito|ensename|show|send)\b/.test(t);
 
-  if (!asked) return null;
+  if (!(hasImageWord || hasAskVerb)) return null;
 
-  // categorías
   if (/\bsemilla(s)?\b/.test(t)) return 'semillas';
-  if (/\bc[aá]psula(s)?\b/.test(t)) return 'capsulas';
-  if (/\bgota(s)?\b/.test(t)) return 'gotas';
+  if (/\bcapsula(s)?\b|\bcaps\b/.test(t)) return 'capsulas';
+  if (/\bgota(s)?\b|\bdrop(s)?\b/.test(t)) return 'gotas';
 
   return 'generic';
+}
+
+// ====== Resolver URL según categoría (usa tus variables nuevas) ======
+function pickUrl(kind: ImgKind): { url?: string; caption: string } {
+  // Tomamos de cfg si existe o directo desde process.env
+  const CAPS = (cfg as any).IMG1_CAPSULAS_URL ?? process.env.IMG1_CAPSULAS_URL;
+  const SEMI = (cfg as any).IMG2_SEMILLAS_URL ?? process.env.IMG2_SEMILLAS_URL;
+  const GOTE = (cfg as any).IMG3_GOTERO_URL   ?? process.env.IMG3_GOTERO_URL;
+
+  const choose = (...cands: (string | undefined)[]) =>
+    cands.find(u => !!u && u.trim().length > 0);
+
+  switch (kind) {
+    case 'capsulas':
+      return { url: choose(CAPS, SEMI, GOTE), caption: 'Cápsulas' };
+    case 'semillas':
+      return { url: choose(SEMI, CAPS, GOTE), caption: 'Semillas ' };
+    case 'gotas':
+      return { url: choose(GOTE, CAPS, SEMI), caption: 'Gotas' };
+    default:
+      return { url: choose(SEMI, CAPS, GOTE), caption: 'Presentación de referencia' };
+  }
 }
 
 // ====== Extractor de texto útil ======
@@ -45,7 +93,7 @@ function getTextFromMessage(msg: proto.IMessage): string {
   return '';
 }
 
-// ====== Anti-duplicados (unchanged) ======
+// ====== Anti-duplicados ======
 const processedIds = new Map<string, number>(); // id -> ts
 const MAX_CACHE = 5000;
 const CACHE_TTL_MS = 10 * 60_000;
@@ -66,7 +114,13 @@ function gcProcessedIds() {
 }
 
 export async function iniciarWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  // Unificar carpeta de sesión por env si la definiste
+  const AUTH_DIR =
+    process.env.WA_AUTH_DIR?.trim() ||
+    process.env.WA_SESSION_DIR?.trim() ||
+    path.join(process.cwd(), 'auth');
+
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -75,19 +129,15 @@ export async function iniciarWhatsApp() {
     printQRInTerminal: false
   });
 
+  console.log(`[AUTH] usando carpeta de sesión: ${AUTH_DIR}`);
+
   // Conexión/QR/Reintento
-  sock.ev.on('connection.update', async (update) => {
+  sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
       console.log('Escaneá este QR para vincular tu sesión:');
       qrcode.generate(qr, { small: true });
-
-      // Guardar PNG en /public/qr.png
-     const qrPath = path.join(process.cwd(), 'public', 'qr.png');
-     await QRCode.toFile(qrPath, qr, { margin: 2, width: 300 });
-     console.log(`QR actualizado en ${qrPath}`);
-
     }
 
     if (connection === 'open') {
@@ -97,7 +147,7 @@ export async function iniciarWhatsApp() {
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       console.warn('Conexión cerrada. Código:', code, 'Reintentar:', shouldReconnect);
       if (shouldReconnect) void iniciarWhatsApp();
-      else console.error('Sesión cerrada (logged out). Borra ./auth para re-vincular.');
+      else console.error('Sesión cerrada (logged out). Borra la carpeta de sesión para re-vincular.');
     }
   });
 
@@ -133,25 +183,36 @@ export async function iniciarWhatsApp() {
         setTimeout(() => { void sock.sendPresenceUpdate('paused', from); }, 600);
       } catch {}
 
-      // ====== NUEVO: Sólo enviar imágenes si el usuario las pide ======
+      // ===== Solicitud de imagen =====
       const imgKind = parseImageRequest(text);
-      if (imgKind) {
-        // Mapas a tus URLs configuradas
-        const map: Record<ImgKind, { url?: string; caption: string }> = {
-          semillas: { url: cfg.IMG1, caption: 'Semillas – presentación de referencia' },
-          capsulas: { url: cfg.IMG2, caption: 'Cápsulas – presentación de referencia' },
-          gotas:    { url: cfg.IMG3, caption: 'Gotas – presentación de referencia' },
-          generic:  { url: cfg.IMG1 || cfg.IMG2 || cfg.IMG3, caption: 'Presentación de referencia' }
-        };
 
-        const chosen = map[imgKind];
-        if (chosen.url) {
-          await sock.sendMessage(from, { image: { url: chosen.url }, caption: chosen.caption });
-        } else {
-          // Si no hay URL configurada, responde con texto aclaratorio
+      // Comando explícito: /foto semillas|capsulas|gotas
+      const fotoCmd = normalize(text).match(/^\/?foto\s+(semillas|capsulas|gotas)\b/);
+      const cmdKind = (fotoCmd?.[1] as ImgKind | undefined) || null;
+
+      const finalKind = imgKind || cmdKind;
+
+      if (finalKind) {
+        const chosen = pickUrl(finalKind);
+
+        if (!chosen.url) {
           await sock.sendMessage(from, { text: 'Por ahora no tengo una imagen cargada para esa presentación. ¿Querés que te comparta info en texto?' });
+          return; // no llamar a IA
         }
-        return; // IMPORTANTE: no responder también con IA
+
+        try {
+          // 1) Intento por URL
+          await sock.sendMessage(from, { image: { url: chosen.url }, caption: chosen.caption });
+        } catch {
+          // 2) Reintento con Buffer
+          try {
+            const buf = await fetchImageBuffer(chosen.url);
+            await sock.sendMessage(from, { image: buf, caption: chosen.caption });
+          } catch {
+            await sock.sendMessage(from, { text: 'No pude enviar la imagen ahora. ¿Te paso la información en texto?' });
+          }
+        }
+        return; // IMPORTANTE: no responder con IA si ya gestionamos imagen
       }
 
       // Si no pidió imagen → responder con IA (solo texto)
