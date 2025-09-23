@@ -63,8 +63,8 @@ export async function aiReply(userText: string, phone: string) {
 - Si te dicen que quieren perder 85 kg se equivocan, es que pesan 85 kg. Seguramente quieran perder entre 5 a 20 kg.
 - Sigue la conversacion teniendo en cuenta los mensajes respondidos anteriormente.
 
-**Mensaje de bienvenida SOLO en el primer turno:**
-- Comenzar la primera respuesta al cliente con: “Bienvenido a Herbalis. Estoy para asesorarte 🙂”
+**Mensaje de bienvenida SOLO en el primer mensaje**
+
 
 **Mensaje de cierre:**
 "Tu pedido ha sido registrado, en las próximas horas recibirás información sobre el envio y el código de seguimiento.
