@@ -3,7 +3,6 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
-  jidNormalizedUser,
   proto
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
@@ -11,12 +10,23 @@ import fetch from 'node-fetch';
 import path from 'path';
 import { aiReply } from './ai.js';
 import { cfg } from './config.js';
+import { promises as fsp } from 'fs';
 
 // ====== Config de espera entre respuestas ======
-const REPLY_DELAY_MS = 10_000;
+const REPLY_DELAY_MS = 5_000;
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-// ====== Helpers de texto/imagen ======
+// ====== Logger ======
+function L(scope: string, obj: any) {
+  try {
+    const time = new Date().toISOString();
+    console.log(`[${time}] [${scope}]`, typeof obj === 'string' ? obj : JSON.stringify(obj));
+  } catch {
+    // no-op
+  }
+}
+
+// ====== Helpers ======
 function normalize(t: string) {
   return (t || '')
     .toLowerCase()
@@ -32,40 +42,30 @@ async function fetchImageBuffer(url: string, timeoutMs = 15000): Promise<Buffer>
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'image/*,*/*;q=0.8'
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'image/*,*/*;q=0.8' }
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const arr = await res.arrayBuffer();
     return Buffer.from(arr);
-  } finally {
-    clearTimeout(id);
-  }
+  } finally { clearTimeout(id); }
 }
 
-// ====== Detección de solicitud de imagen / intención ======
-type ImgKind = 'semillas' | 'capsulas' | 'gotas' | 'generic' |'dosificar';
+// ====== Intenciones / productos ======
+type ImgKind =
+  | 'semillas' | 'capsulas' | 'gotas'
+  | 'precio_semillas' | 'precio_capsulas' | 'precio_gotas'
+  | 'dosificar' | 'bienvenida';
 
-function parseImageRequest(raw: string): ImgKind | null {
+// ¿Se pidió precio?
+function wantsPrice(raw: string): boolean {
   const t = normalize(raw);
-
-  const hasImageWord = /\b(imagen|imagenes|foto|fotos|picture|pic|photo|📸|🖼️)\b/.test(t);
-  const hasAskVerb   = /\b(mostrar|mostrame|mostra|manda|mandame|ver|podria|podrias|necesito|ensename|show|send)\b/.test(t);
-
-  if (!(hasImageWord || hasAskVerb)) return null;
-
-  if (/\bsemilla(s)?\b/.test(t)) return 'semillas';
-  if (/\bcapsula(s)?\b|\bcaps\b/.test(t)) return 'capsulas';
-  if (/\bgota(s)?\b|\bdrop(s)?\b/.test(t)) return 'gotas';
-  if (/\bdosificar\b/.test(t)) return 'dosificar';
-
-  return 'generic';
+  return /\b(precio|precios|cuanto\s+(sale|vale|cuesta|estan?)|cuanto|costo|lista\s+de\s+precios|tarifa|oferta|ofertas|promo|promocion|promos?)\b/.test(t)
+      || /\$\s*\d/.test(t)
+      || /\bars\b/.test(t);
 }
 
-// SOLO para producto (no patología ni dosificar)
-function parseProductKind(raw: string): ImgKind | null {
+// Producto mencionado
+function parseProductKind(raw: string): 'semillas'|'capsulas'|'gotas'|null {
   const t = normalize(raw);
   if (/\bsemilla(s)?\b|\bnuez(es)?\b/.test(t)) return 'semillas';
   if (/\bcapsula(s)?\b|\bcaps\b/.test(t)) return 'capsulas';
@@ -82,27 +82,101 @@ function wantsNuezInstructions(raw: string): boolean {
   return mentionsNuez && !mentionsCapsOrDrops && mentionsInstructions;
 }
 
-// ====== Resolver URL según categoría (usa tus variables de entorno) ======
-function pickUrl(kind: ImgKind): { url?: string; caption: string } {
-  const CAPS = (cfg as any).IMG1_CAPSULAS_URL ?? process.env.IMG1_CAPSULAS_URL;
-  const SEMI = (cfg as any).IMG2_SEMILLAS_URL ?? process.env.IMG2_SEMILLAS_URL;
-  const GOTE = (cfg as any).IMG3_GOTERO_URL   ?? process.env.IMG3_GOTERO_URL;
-  const BIENVENIDA = (cfg as any).IMG4_BIENVEDNIDA_URL ?? process.env.IMG4_BIENVEDNIDA_URL; // (nombre original)
-  const DOSIFICAR  = (cfg as any).IMG7_DOSIFICAR_URL   ?? process.env.IMG7_DOSIFICAR_URL;
+// ====== Registro de pedidos en CSV ======
+const ORDER_CSV_PATH = process.env.ORDERS_CSV_PATH?.trim() || path.join(process.cwd(), 'data', 'orders.csv');
+const ORDER_CSV_HEADERS = [
+  'timestamp_iso',
+  'chat_jid',
+  'pause_key',
+  'product_intent',
+  'price_intent',
+  'quantity_guess',
+  'has_address_hint',
+  'raw_text'
+];
 
-  const choose = (...cands: (string | undefined)[]) =>
-    cands.find(u => !!u && u.trim().length > 0);
+async function ensureOrderCsv() {
+  const dir = path.dirname(ORDER_CSV_PATH);
+  await fsp.mkdir(dir, { recursive: true });
+  const exists = await fsp.access(ORDER_CSV_PATH).then(() => true).catch(() => false);
+  if (!exists) {
+    await fsp.writeFile(ORDER_CSV_PATH, ORDER_CSV_HEADERS.join(',') + '\n', 'utf8');
+    L('ORD_CSV_INIT', { path: ORDER_CSV_PATH });
+  }
+}
+function csvEscape(val: string) {
+  const v = (val ?? '').replace(/\r?\n/g, ' ').replace(/"/g, '""');
+  return `"${v}"`;
+}
+async function appendOrderCsv(row: Record<string, string>) {
+  await ensureOrderCsv();
+  const line = ORDER_CSV_HEADERS.map(h => csvEscape(row[h] ?? '')).join(',') + '\n';
+  await fsp.appendFile(ORDER_CSV_PATH, line, 'utf8');
+  L('ORD_CSV_APPEND', { path: ORDER_CSV_PATH });
+}
+
+// Heurística de detección de pedido
+type OrderDetect = {
+  isOrder: boolean;
+  quantityGuess: string;
+  hasAddressHint: boolean;
+};
+function detectOrder(raw: string): OrderDetect {
+  const t = normalize(raw);
+
+  const intentWords = /\b(quiero|deseo|necesito|hago|hacer|realizar|confirmar)\b.*\b(pedido|compra|orden)\b/.test(t)
+    || /\b(quiero|deseo|necesito)\b.*\b(semillas?|capsulas?|gotas?)\b/.test(t)
+    || /\b(enviar|mandar|envio|envío)\b/.test(t)
+    || /\bcontra\s*reembolso\b/.test(t);
+
+  const hasQty =
+    /\b(\d+)\s*(botes?|frascos?|unidades?|u\.?|pack|cajas?)\b/.test(t) ||
+    /\b(pack|combo)\b/.test(t) ||
+    /\b(dos|tres|cuatro|cinco)\b\s*(botes?|frascos?|unidades?)\b/.test(t);
+
+  const qtyMatch = t.match(/\b(\d+)\s*(botes?|frascos?|unidades?|u\.?|pack|cajas?)\b/);
+  const quantityGuess = qtyMatch?.[1] || (/\b(dos)\b/.test(t) ? '2' : /\b(tres)\b/.test(t) ? '3' : '');
+
+  const hasAddressHint =
+    /\b(direccion|dirección|calle|av\.?|avenida|nro|numero|número|cp|codigo postal|c\.p\.|barrio|ciudad|provincia)\b/.test(t)
+    || /\bentre\s+calles?\b/.test(t);
+
+  const mentionsProduct = /\b(semillas?|capsulas?|gotas?)\b/.test(t);
+
+  const isOrder = (intentWords || hasQty || hasAddressHint) && mentionsProduct;
+
+  return { isOrder, quantityGuess: quantityGuess || (hasQty ? '?' : ''), hasAddressHint };
+}
+
+// ====== Resolver URL según categoría (usa tus variables .env) ======
+function pickUrl(kind: ImgKind): { url?: string; caption: string } {
+  // Precios
+  const PREC_CAPS = (cfg as any).IMG1_PrecioCAPSULAS_URL ?? process.env.IMG1_PrecioCAPSULAS_URL;
+  const PREC_SEMI = (cfg as any).IMG2_PrecioSEMILLAS_URL ?? process.env.IMG2_PrecioSEMILLAS_URL;
+  const PREC_GOTE = (cfg as any).IMG3_PrecioGOTERO_URL   ?? process.env.IMG3_PrecioGOTERO_URL;
+  // Bienvenida
+  const BIENV    = (cfg as any).IMG4_BIENVENIDA_URL      ?? process.env.IMG4_BIENVENIDA_URL;
+  // Info general
+  const INFO_CAPS = (cfg as any).IMG5_CAPSULA_URL        ?? process.env.IMG5_CAPSULA_URL;
+  const INFO_SEMI = (cfg as any).IMG6_SEMILLAS_URL       ?? process.env.IMG6_SEMILLAS_URL;
+  const INFO_GOTE = (cfg as any).IMG6_GOTERO_URL         ?? process.env.IMG6_GOTERO_URL;
+
+  const choose = (...cands: (string | undefined)[]) => cands.find(u => !!u && u.trim().length > 0);
 
   switch (kind) {
-    case 'capsulas':   return { url: choose(CAPS, SEMI, GOTE), caption: 'Cápsulas' };
-    case 'semillas':   return { url: choose(SEMI, CAPS, GOTE), caption: 'Semillas' };
-    case 'gotas':      return { url: choose(GOTE, CAPS, SEMI), caption: 'Gotas' };
-    case 'dosificar':  return { url: choose(DOSIFICAR ?? BIENVENIDA), caption: 'Cómo dosificar' };
-    default:           return { url: choose(BIENVENIDA), caption: 'Preguntame lo que necesites' };
+    case 'precio_capsulas':  return { url: choose(PREC_CAPS), caption: 'Cápsulas · Precios' };
+    case 'precio_semillas':  return { url: choose(PREC_SEMI), caption: 'Semillas · Precios' };
+    case 'precio_gotas':     return { url: choose(PREC_GOTE), caption: 'Gotas · Precios' };
+    case 'capsulas':         return { url: choose(INFO_CAPS), caption: 'Cápsulas' };
+    case 'semillas':         return { url: choose(INFO_SEMI), caption: 'Semillas' };
+    case 'gotas':            return { url: choose(INFO_GOTE), caption: 'Gotas' };
+    case 'dosificar':        return { url: choose(INFO_SEMI), caption: 'Cómo dosificar (Nuez)' };
+    case 'bienvenida':       return { url: choose(BIENV), caption: '' };
+    default:                 return { url: choose(BIENV), caption: '' };
   }
 }
 
-// ====== Extractor de texto útil ======
+// ====== Extraer texto útil ======
 function getTextFromMessage(msg: proto.IMessage): string {
   if (!msg) return '';
   if (msg.conversation) return msg.conversation;
@@ -120,135 +194,313 @@ const MAX_CACHE = 5000;
 const CACHE_TTL_MS = 10 * 60_000;
 function gcProcessedIds() {
   const now = Date.now();
-  for (const [id, ts] of processedIds) {
-    if (now - ts > CACHE_TTL_MS) processedIds.delete(id);
-  }
+  for (const [id, ts] of processedIds) if (now - ts > CACHE_TTL_MS) processedIds.delete(id);
   if (processedIds.size > MAX_CACHE) {
     const toDelete = processedIds.size - MAX_CACHE;
     let i = 0;
-    for (const k of processedIds.keys()) {
-      processedIds.delete(k);
-      if (++i >= toDelete) break;
+    for (const k of processedIds.keys()) { processedIds.delete(k); if (++i >= toDelete) break; }
+  }
+}
+
+// ====== pauseKey por dígitos + pausa por conversación (2h) ======
+const PAUSE_TTL_MS = 2 * 60 * 60 * 1000;
+
+// clave estable por chat basada en dígitos del número
+function pauseKeyFromJid(jidRaw: string): string {
+  const digits = (jidRaw || '').replace(/\D+/g, '');
+  const key = digits || jidRaw;
+  L('PAUSEKEY', { jidRaw, key });
+  return key;
+}
+
+const pausedByKey = new Map<string, number>();     // pauseKey -> ts
+const chatEpochByKey = new Map<string, number>();  // pauseKey -> epoch
+
+function getEpoch(key: string) { return chatEpochByKey.get(key) ?? 0; }
+function bumpEpoch(key: string) {
+  const v = getEpoch(key) + 1;
+  chatEpochByKey.set(key, v);
+  L('EPOCH', { key, newEpoch: v });
+}
+
+function setPaused(jidRaw: string) {
+  const key = pauseKeyFromJid(jidRaw);
+  pausedByKey.set(key, Date.now());
+  L('PAUSE_SET', { jidRaw, key, ts: Date.now() });
+  bumpEpoch(key);
+}
+function clearPaused(jidRaw: string) {
+  const key = pauseKeyFromJid(jidRaw);
+  pausedByKey.delete(key);
+  L('PAUSE_CLEAR', { jidRaw, key });
+  bumpEpoch(key);
+}
+function isPausedAny(jidRaw: string): boolean {
+  const key = pauseKeyFromJid(jidRaw);
+  const ts = pausedByKey.get(key);
+  if (!ts) {
+    L('PAUSE_CHECK', { jidRaw, key, paused: false });
+    return false;
+  }
+  const expired = (Date.now() - ts) >= PAUSE_TTL_MS;
+  if (expired) {
+    pausedByKey.delete(key);
+    L('PAUSE_EXPIRE', { jidRaw, key, ts, now: Date.now() });
+    return false;
+  }
+  L('PAUSE_CHECK', { jidRaw, key, paused: true });
+  return true;
+}
+function gcPaused() {
+  const now = Date.now();
+  for (const [k, ts] of pausedByKey) {
+    if (now - ts >= PAUSE_TTL_MS) {
+      pausedByKey.delete(k);
+      L('PAUSE_GC', { key: k, removedAt: now });
     }
   }
 }
 
-// ====== Pausa POR CONVERSACIÓN con TTL (2 horas) ======
-const PAUSE_TTL_MS = 2 * 60 * 60 * 1000; // 2h
-const pausedChats = new Map<string, number>(); // chatJid -> timestamp (ms)
-function gcPaused() {
-  const now = Date.now();
-  for (const [jid, ts] of pausedChats) {
-    if (now - ts >= PAUSE_TTL_MS) pausedChats.delete(jid);
+// ====== Último chat entrante (para comandos sin número) ======
+let lastInboundChatRaw: string | null = null;
+
+// Resolver destino desde comando o fallback
+function resolveTargetJidFromCommand(text: string, fallback: string | null): string | null {
+  const t = normalize(text);
+  const digits = (t.match(/\d{7,}/g) || [])[0]; // primer número largo
+  if (digits) {
+    const jid = `${digits}@s.whatsapp.net`;
+    L('CMD_TARGET_FROM_NUMBER', { digits, jid });
+    return jid;
   }
+  if (fallback) {
+    L('CMD_TARGET_FROM_LASTINBOUND', { jid: fallback });
+    return fallback;
+  }
+  L('CMD_TARGET_NOT_FOUND', {});
+  return null;
 }
-function isPaused(jid: string): boolean {
-  const ts = pausedChats.get(jid);
-  if (!ts) return false;
-  if (Date.now() - ts >= PAUSE_TTL_MS) { pausedChats.delete(jid); return false; }
-  return true;
-}
 
-// ====== Buffer de mensajes por chat (debounce 10s) ======
-type Pending = { parts: string[]; timer?: NodeJS.Timeout };
-const pendingByChat = new Map<string, Pending>();
-
-async function processBatch(sock: ReturnType<typeof makeWASocket>, chatJid: string) {
-  const pending = pendingByChat.get(chatJid);
-  if (!pending) return;
-  pendingByChat.delete(chatJid);
-
-  const combinedText = pending.parts.join(' ').trim();
-  if (!combinedText) return;
-
-  // Presencia
+// ====== Wrapper de envío seguro ======
+async function safeSendMessage(
+  sock: ReturnType<typeof makeWASocket>,
+  jidRaw: string,
+  content: any
+) {
+  if (isPausedAny(jidRaw)) {
+    L('SEND_SKIP_PAUSED', { jidRaw, reason: 'paused' });
+    return;
+  }
   try {
-    await sock.presenceSubscribe(chatJid);
-    await sock.sendPresenceUpdate('composing', chatJid);
-    setTimeout(() => { void sock.sendPresenceUpdate('paused', chatJid); }, 600);
-  } catch {}
-
-  // Intención para combo de imagen + IA basados en TODO el batch
-  const productKind = parseProductKind(combinedText);
-  const medicalKind =
-    (/\bdiabetes\b/i.test(combinedText)) ? 'diabetes'
-    : (/\bhipo?tiroidismo\b/i.test(combinedText)) ? 'hipotiroidismo'
-    : (/\bhiper?tiroidismo\b/i.test(combinedText)) ? 'hipertiroidismo'
-    : null;
-  const onlyNuezInstr = wantsNuezInstructions(combinedText);
-
-  let comboImageKind: ImgKind | null = null;
-  if (medicalKind) comboImageKind = medicalKind as ImgKind;
-  else if (onlyNuezInstr) comboImageKind = 'dosificar';
-  else if (productKind) comboImageKind = productKind;
-
-  // Llamada IA con el texto combinado
-  const reply = await aiReply(combinedText, chatJid);
-
-  // Imagen combinada (si aplica)
-  if (comboImageKind) {
-    const chosen = pickUrl(comboImageKind);
-    if (chosen?.url) {
+    L('SEND_TRY', { jidRaw, kind: Object.keys(content)[0] });
+    await sock.sendMessage(jidRaw, content);
+    L('SEND_OK', { jidRaw, kind: Object.keys(content)[0] });
+  } catch (e) {
+    L('SEND_ERR', { jidRaw, error: (e as Error)?.message });
+    if (content?.image?.url) {
       try {
-        await delay(REPLY_DELAY_MS);
-        await sock.sendMessage(chatJid, { image: { url: chosen.url }, caption: chosen.caption });
-      } catch {
-        try {
-          const buf = await fetchImageBuffer(chosen.url!);
-          await delay(REPLY_DELAY_MS);
-          await sock.sendMessage(chatJid, { image: buf, caption: chosen.caption });
-        } catch {
-          // si falla la imagen, seguimos con el texto IA
+        const buf = await fetchImageBuffer(content.image.url);
+        if (isPausedAny(jidRaw)) {
+          L('SEND_BUF_SKIP_PAUSED', { jidRaw });
+          return;
         }
+        await sock.sendMessage(jidRaw, { image: buf, caption: content.caption ?? content.image?.caption ?? content?.caption });
+        L('SEND_BUF_OK', { jidRaw });
+      } catch (e2) {
+        L('SEND_BUF_ERR', { jidRaw, error: (e2 as Error)?.message });
       }
     }
   }
+}
 
-  // Texto IA final (una sola respuesta)
+// ====== Bienvenida 1 vez por día ======
+const dailyWelcome = new Map<string, string>(); // jidRaw -> YYYY-MM-DD
+function todayStr() {
+  const d = new Date(); const mm = String(d.getMonth()+1).padStart(2,'0'); const dd = String(d.getDate()).padStart(2,'0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+function shouldSendDailyWelcome(jidRaw: string): boolean {
+  const t = todayStr();
+  const prev = dailyWelcome.get(jidRaw);
+  if (prev === t) return false;
+  dailyWelcome.set(jidRaw, t);
+  L('WELCOME_MARK', { jidRaw, day: t });
+  return true;
+}
+
+// ====== NUEVO: evitar repetición de imágenes de info (caps/semillas/gotas) ======
+const infoImgSentByKey = new Map<string, Set<'capsulas' | 'semillas' | 'gotas'>>();
+
+function isInfoKind(kind: ImgKind): kind is 'capsulas' | 'semillas' | 'gotas' {
+  return kind === 'capsulas' || kind === 'semillas' || kind === 'gotas';
+}
+function alreadySentInfo(jidRaw: string, kind: 'capsulas' | 'semillas' | 'gotas'): boolean {
+  const key = pauseKeyFromJid(jidRaw);
+  const set = infoImgSentByKey.get(key);
+  const sent = !!set && set.has(kind);
+  L('GATE_INFO_CHECK', { jidRaw, key, kind, sent });
+  return sent;
+}
+function markSentInfo(jidRaw: string, kind: 'capsulas' | 'semillas' | 'gotas') {
+  const key = pauseKeyFromJid(jidRaw);
+  let set = infoImgSentByKey.get(key);
+  if (!set) { set = new Set(); infoImgSentByKey.set(key, set); }
+  set.add(kind);
+  L('GATE_INFO_SENT', { jidRaw, key, kind });
+}
+
+// ====== Buffer por chat (debounce 10s) + epoch por pauseKey ======
+type Pending = { parts: string[]; timer?: NodeJS.Timeout; epoch: number };
+const pendingByKey = new Map<string, Pending>();
+
+async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: string, key: string) {
+  const pending = pendingByKey.get(key);
+  if (!pending) { L('BATCH_MISS', { jidRaw, key }); return; }
+  pendingByKey.delete(key);
+  L('BATCH_START', { jidRaw, key, epoch: pending.epoch });
+
+  if (isPausedAny(jidRaw)) { L('BATCH_ABORT_PAUSED', { jidRaw, key }); return; }
+  if (pending.epoch !== getEpoch(key)) { L('BATCH_ABORT_EPOCH', { jidRaw, key, old: pending.epoch, current: getEpoch(key) }); return; }
+
+  const combinedText = pending.parts.join(' ').trim();
+  L('BATCH_COMBINED', { jidRaw, key, len: combinedText.length, text: combinedText });
+  if (!combinedText) return;
+
+  try {
+    await sock.presenceSubscribe(jidRaw);
+    await sock.sendPresenceUpdate('composing', jidRaw);
+    setTimeout(() => { void sock.sendPresenceUpdate('paused', jidRaw); }, 600);
+  } catch {}
+
+  // Bienvenida (solo 1 vez al día)
+  if (shouldSendDailyWelcome(jidRaw)) {
+    const w = pickUrl('bienvenida');
+    if (w.url) {
+      await delay(REPLY_DELAY_MS);
+      if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('WELCOME_ABORT', { jidRaw, key }); return; }
+      await safeSendMessage(sock, jidRaw, { image: { url: w.url }, caption: w.caption });
+    }
+  }
+
+  // Intención (en todo el batch)
+  const product = parseProductKind(combinedText);
+  const price = wantsPrice(combinedText);
+  const onlyNuezInstr = wantsNuezInstructions(combinedText);
+
+  // Prioridad: precio+producto > dosificar > producto
+  let comboImageKind: ImgKind | null = null;
+  if (product && price) {
+    comboImageKind =
+      product === 'semillas' ? 'precio_semillas' :
+      product === 'capsulas' ? 'precio_capsulas' :
+      'precio_gotas';
+  } else if (onlyNuezInstr) {
+    comboImageKind = 'dosificar';
+  } else if (product) {
+    comboImageKind = product;
+  }
+  L('INTENT', { jidRaw, key, product, price, onlyNuezInstr, comboImageKind });
+
+  // ====== Detección + guardado del pedido en CSV ======
+  const order = detectOrder(combinedText);
+  if (order.isOrder) {
+    const row = {
+      timestamp_iso: new Date().toISOString(),
+      chat_jid: jidRaw,
+      pause_key: key,
+      product_intent: product ?? '',
+      price_intent: price ? 'yes' : 'no',
+      quantity_guess: order.quantityGuess || '',
+      has_address_hint: order.hasAddressHint ? 'yes' : 'no',
+      raw_text: combinedText
+    };
+    try {
+      await appendOrderCsv(row);
+      L('ORDER_DETECTED', { jidRaw, key, row });
+    } catch (e) {
+      L('ORDER_ERR', { error: (e as Error)?.message });
+    }
+  }
+
+  // Llamada IA
+  const reply = await aiReply(combinedText, jidRaw);
+  L('AI_REPLY_LEN', { jidRaw, key, len: (reply || '').length });
+
+  if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('POST_AI_ABORT', { jidRaw, key }); return; }
+
+  // Imagen combinada si aplica (evitar repetición para info de caps/semillas/gotas)
+  if (comboImageKind) {
+    const chosen = pickUrl(comboImageKind);
+    if (chosen?.url) {
+      // Gate: solo para info de caps/semillas/gotas. No afecta bienvenida, precios ni dosificar.
+      if (isInfoKind(comboImageKind) && alreadySentInfo(jidRaw, comboImageKind)) {
+        L('GATE_INFO_SKIP', { jidRaw, key, kind: comboImageKind });
+      } else {
+        await delay(REPLY_DELAY_MS);
+        if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('IMG_ABORT', { jidRaw, key }); return; }
+        await safeSendMessage(sock, jidRaw, { image: { url: chosen.url }, caption: chosen.caption });
+        if (isInfoKind(comboImageKind)) {
+          markSentInfo(jidRaw, comboImageKind);
+        }
+      }
+    } else {
+      L('IMG_SKIP_NOURL', { jidRaw, key, comboImageKind });
+    }
+  }
+
+  // Texto IA
   await delay(REPLY_DELAY_MS);
-  await sock.sendMessage(chatJid, { text: reply });
+  if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('TEXT_ABORT', { jidRaw, key }); return; }
+  await safeSendMessage(sock, jidRaw, { text: reply });
 
-  // /foto ... manual extra dentro del batch
-  const fotoCmd = normalize(combinedText).match(/^\/?foto\s+(semillas|capsulas|gotas|diabetes|hipotiroidismo|hipertiroidismo|dosificar)\b/);
+  // /foto ... explícito dentro del batch (para pruebas) — NO se gatea para permitir forzar envío
+  const fotoCmd = normalize(combinedText).match(/^\/?foto\s+(semillas|capsulas|gotas|precio_semillas|precio_capsulas|precio_gotas|dosificar)\b/);
   if (fotoCmd?.[1]) {
     const extraKind = fotoCmd[1] as ImgKind;
     const extra = pickUrl(extraKind);
     if (extra?.url) {
-      try {
-        await delay(REPLY_DELAY_MS);
-        await sock.sendMessage(chatJid, { image: { url: extra.url }, caption: extra.caption });
-      } catch {
-        try {
-          const buf = await fetchImageBuffer(extra.url!);
-          await delay(REPLY_DELAY_MS);
-          await sock.sendMessage(chatJid, { image: buf, caption: extra.caption });
-        } catch {
-          await delay(REPLY_DELAY_MS);
-          await sock.sendMessage(chatJid, { text: 'No pude enviar esa imagen ahora.' });
-        }
-      }
+      await delay(REPLY_DELAY_MS);
+      if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('EXTRA_IMG_ABORT', { jidRaw, key }); return; }
+      await safeSendMessage(sock, jidRaw, { image: { url: extra.url }, caption: extra.caption });
+      // Nota: no marcamos aquí para que /foto no bloquee futuros envíos automáticos de info
     } else {
       await delay(REPLY_DELAY_MS);
-      await sock.sendMessage(chatJid, { text: 'No tengo esa imagen configurada.' });
+      if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('EXTRA_TEXT_ABORT', { jidRaw, key }); return; }
+      await safeSendMessage(sock, jidRaw, { text: 'No tengo esa imagen configurada.' });
+    }
+  }
+
+  L('BATCH_END', { jidRaw, key });
+}
+
+function enqueueMessageForChat(sock: ReturnType<typeof makeWASocket>, jidRaw: string, text: string) {
+  if (isPausedAny(jidRaw)) { L('ENQ_SKIP_PAUSED', { jidRaw }); return; }
+  const key = pauseKeyFromJid(jidRaw);
+  const currentEpoch = getEpoch(key);
+  const existing = pendingByKey.get(key);
+
+  if (!existing) {
+    const p: Pending = { parts: [text], epoch: currentEpoch };
+    p.timer = setTimeout(() => { void processBatch(sock, jidRaw, key); }, REPLY_DELAY_MS);
+    pendingByKey.set(key, p);
+    L('ENQ_NEW', { jidRaw, key, epoch: currentEpoch, parts: 1 });
+  } else {
+    if (existing.epoch !== currentEpoch) {
+      if (existing.timer) clearTimeout(existing.timer);
+      const p: Pending = { parts: [text], epoch: currentEpoch };
+      p.timer = setTimeout(() => { void processBatch(sock, jidRaw, key); }, REPLY_DELAY_MS);
+      pendingByKey.set(key, p);
+      L('ENQ_RESET_EPOCH', { jidRaw, key, epoch: currentEpoch });
+    } else {
+      existing.parts.push(text);
+      if (existing.timer) clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => { void processBatch(sock, jidRaw, key); }, REPLY_DELAY_MS);
+      L('ENQ_APPEND', { jidRaw, key, epoch: existing.epoch, parts: existing.parts.length });
     }
   }
 }
 
-function enqueueMessageForChat(sock: ReturnType<typeof makeWASocket>, chatJid: string, text: string) {
-  const existing = pendingByChat.get(chatJid);
-  if (!existing) {
-    const p: Pending = { parts: [text] };
-    p.timer = setTimeout(() => { void processBatch(sock, chatJid); }, REPLY_DELAY_MS);
-    pendingByChat.set(chatJid, p);
-  } else {
-    existing.parts.push(text);
-    if (existing.timer) clearTimeout(existing.timer);
-    existing.timer = setTimeout(() => { void processBatch(sock, chatJid); }, REPLY_DELAY_MS);
-  }
-}
-
 // ================================================
-
 export async function iniciarWhatsApp() {
   const AUTH_DIR =
     process.env.WA_AUTH_DIR?.trim() ||
@@ -258,23 +510,15 @@ export async function iniciarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false
-  });
-
+  const sock = makeWASocket({ version, auth: state, printQRInTerminal: false });
   console.log(`[AUTH] usando carpeta de sesión: ${AUTH_DIR}`);
 
-  // Conexión/QR/Reintento
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
-
     if (qr) {
       console.log('Escaneá este QR para vincular tu sesión:');
       qrcode.generate(qr, { small: true });
     }
-
     if (connection === 'open') {
       console.log('✅ Conectado a WhatsApp');
     } else if (connection === 'close') {
@@ -297,47 +541,88 @@ export async function iniciarWhatsApp() {
       const msg = m.messages?.[0];
       if (!msg || !msg.message) return;
 
-      const chatJid = jidNormalizedUser(msg.key.remoteJid || '');
-      if (!chatJid || chatJid === 'status@broadcast') return;
+      const chatJidRaw = msg.key.remoteJid || '';
+      if (!chatJidRaw || chatJidRaw === 'status@broadcast') return;
 
       const fromMe = !!msg.key.fromMe;
       const text = getTextFromMessage(msg.message).trim();
+      const messageId = msg.key.id || `${chatJidRaw}:${Date.now()}`;
+
+      L('MSG_IN', { messageId, chatJidRaw, fromMe, text });
+
       if (!text) return;
 
-      // Comandos owner-only
-      if (fromMe) {
-        const t = normalize(text);
-        if (/^\/?\s*bot(?:-|\s*)pause\b/.test(t)) {
-          pausedChats.set(chatJid, Date.now());
-          try { await sock.presenceSubscribe(chatJid); await sock.sendPresenceUpdate('composing', chatJid); setTimeout(() => { void sock.sendPresenceUpdate('paused', chatJid); }, 600); } catch {}
-          await delay(REPLY_DELAY_MS);
-          await sock.sendMessage(chatJid, { text: '🛑 Bot pausado aquí por 2 horas. Mandá "bot-play" en este chat para reanudar antes.' });
-          return;
-        }
-        if (/^\/?\s*bot(?:-|\s*)play\b/.test(t)) {
-          const wasPaused = pausedChats.delete(chatJid);
-          try { await sock.presenceSubscribe(chatJid); await sock.sendPresenceUpdate('composing', chatJid); setTimeout(() => { void sock.sendPresenceUpdate('paused', chatJid); }, 600); } catch {}
-          await delay(REPLY_DELAY_MS);
-          await sock.sendMessage(chatJid, { text: wasPaused ? '▶️ Bot reanudado en este chat.' : '▶️ El bot ya estaba activo en este chat.' });
-          return;
-        }
-        return;
-      }
-
-      // Pausa por chat
-      if (isPaused(chatJid)) return;
-
-      // Deduplicación
-      const messageId = msg.key.id || `${chatJid}:${Date.now()}`;
-      if (processedIds.has(messageId)) return;
+      // Dedupe
+      if (processedIds.has(messageId)) { L('DEDUP_SKIP', { messageId }); return; }
       processedIds.set(messageId, Date.now());
       gcProcessedIds();
 
-      // NUEVO: encolar para responder en un solo mensaje tras 10s
-      enqueueMessageForChat(sock, chatJid, text);
+      // ===== Comandos owner-only (enviados desde tu propio número / LID) =====
+      if (fromMe) {
+        const t = normalize(text);
+        L('CMD_CHECK', { chatJidRaw, t });
 
-    } catch (err) {
-      console.error('Error en messages.upsert:', err);
+        // bot-pause (con número o sin número -> usa último entrante)
+        if (/^\/?\s*bot(?:-|\s*)pause\b/.test(t)) {
+          const targetJidRaw = resolveTargetJidFromCommand(text, lastInboundChatRaw);
+          if (!targetJidRaw) {
+            await delay(REPLY_DELAY_MS);
+            await safeSendMessage(sock, chatJidRaw, { text: 'No pude determinar qué chat pausar. Enviá: bot-pause <numeroSin+>' });
+            return;
+          }
+
+          setPaused(targetJidRaw);
+
+          // cancelar cualquier batch pendiente del destino (por pauseKey)
+          const targetKey = pauseKeyFromJid(targetJidRaw);
+          const pending = pendingByKey.get(targetKey);
+          if (pending?.timer) clearTimeout(pending.timer);
+          pendingByKey.delete(targetKey);
+          L('CMD_PAUSE_OK', { fromChat: chatJidRaw, targetJidRaw, key: targetKey });
+
+          try { await sock.presenceSubscribe(chatJidRaw); await sock.sendPresenceUpdate('composing', chatJidRaw); setTimeout(() => { void sock.sendPresenceUpdate('paused', chatJidRaw); }, 600); } catch {}
+          await delay(REPLY_DELAY_MS);
+          await safeSendMessage(sock, chatJidRaw, { text: `🛑 Bot pausado por 2 horas en ${targetJidRaw}. Mandá "bot-play ${targetJidRaw.replace('@s.whatsapp.net','')}" para reanudar antes.` });
+          return;
+        }
+
+        // bot-play (con número o sin número -> usa último entrante)
+        if (/^\/?\s*bot(?:-|\s*)play\b/.test(t)) {
+          const targetJidRaw = resolveTargetJidFromCommand(text, lastInboundChatRaw);
+          if (!targetJidRaw) {
+            await delay(REPLY_DELAY_MS);
+            await safeSendMessage(sock, chatJidRaw, { text: 'No pude determinar qué chat reanudar. Enviá: bot-play <numeroSin+>' });
+            return;
+          }
+
+          const wasPaused = isPausedAny(targetJidRaw);
+          clearPaused(targetJidRaw);
+          L('CMD_PLAY_OK', { fromChat: chatJidRaw, targetJidRaw, wasPaused });
+
+          try { await sock.presenceSubscribe(chatJidRaw); await sock.sendPresenceUpdate('composing', chatJidRaw); setTimeout(() => { void sock.sendPresenceUpdate('paused', chatJidRaw); }, 600); } catch {}
+          await delay(REPLY_DELAY_MS);
+          await safeSendMessage(sock, chatJidRaw, { text: wasPaused ? `▶️ Bot reanudado en ${targetJidRaw}.` : `▶️ El bot ya estaba activo en ${targetJidRaw}.` });
+          return;
+        }
+
+        // No auto-responder mis propios mensajes
+        L('SELF_SKIP', { chatJidRaw });
+        return;
+      }
+
+      // Actualizar último chat entrante (para comandos sin número)
+      lastInboundChatRaw = chatJidRaw;
+      L('LAST_INBOUND_SET', { lastInboundChatRaw });
+
+      // Si está pausado → silencio total
+      if (isPausedAny(chatJidRaw)) { L('MSG_SKIP_PAUSED', { chatJidRaw }); return; }
+
+      // Encolar para batch 10s (unir mensajes del usuario)
+      enqueueMessageForChat(sock, chatJidRaw, text);
+
+    } catch (err: any) {
+      console.error('Error en messages.upsert:', err?.message || err);
+      L('MSG_ERR', { error: err?.message || String(err) });
     }
   });
 
