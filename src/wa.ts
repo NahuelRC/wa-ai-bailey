@@ -115,7 +115,7 @@ async function appendOrderCsv(row: Record<string, string>) {
   L('ORD_CSV_APPEND', { path: ORDER_CSV_PATH });
 }
 
-// Heurística de detección de pedido
+// Heurística de detección de pedido (texto libre)
 type OrderDetect = {
   isOrder: boolean;
   quantityGuess: string;
@@ -146,6 +146,26 @@ function detectOrder(raw: string): OrderDetect {
   const isOrder = (intentWords || hasQty || hasAddressHint) && mentionsProduct;
 
   return { isOrder, quantityGuess: quantityGuess || (hasQty ? '?' : ''), hasAddressHint };
+}
+
+// === NUEVO === Parseo del mensaje final de confirmación "Resumen: ... <END_CONVERSATION/>"
+function parseFinalOrderSummary(text: string): null | {
+  product: string;
+  qty: string;
+  name: string;
+  address: string;
+  city: string;
+  postal: string;
+} {
+  if (!/resumen:/i.test(text) || !/<end_conversation\/>/i.test(text)) return null;
+
+  // Acepta "—" o "-"
+  const re = /resumen:\s*(.+?)\s*x\s*(\d+)\b.*?[—-]\s*([^,]+),\s*([^,]+),\s*([^,]+),\s*([^.]+)\.?/i;
+  const m = text.match(re);
+  if (!m) return null;
+
+  const [, product, qty, name, address, city, postal] = m.map(s => (s ?? '').trim());
+  return { product, qty, name, address, city, postal };
 }
 
 // ====== Resolver URL según categoría (usa tus variables .env) ======
@@ -328,27 +348,6 @@ function shouldSendDailyWelcome(jidRaw: string): boolean {
   return true;
 }
 
-// ====== NUEVO: evitar repetición de imágenes de info (caps/semillas/gotas) ======
-const infoImgSentByKey = new Map<string, Set<'capsulas' | 'semillas' | 'gotas'>>();
-
-function isInfoKind(kind: ImgKind): kind is 'capsulas' | 'semillas' | 'gotas' {
-  return kind === 'capsulas' || kind === 'semillas' || kind === 'gotas';
-}
-function alreadySentInfo(jidRaw: string, kind: 'capsulas' | 'semillas' | 'gotas'): boolean {
-  const key = pauseKeyFromJid(jidRaw);
-  const set = infoImgSentByKey.get(key);
-  const sent = !!set && set.has(kind);
-  L('GATE_INFO_CHECK', { jidRaw, key, kind, sent });
-  return sent;
-}
-function markSentInfo(jidRaw: string, kind: 'capsulas' | 'semillas' | 'gotas') {
-  const key = pauseKeyFromJid(jidRaw);
-  let set = infoImgSentByKey.get(key);
-  if (!set) { set = new Set(); infoImgSentByKey.set(key, set); }
-  set.add(kind);
-  L('GATE_INFO_SENT', { jidRaw, key, kind });
-}
-
 // ====== Buffer por chat (debounce 10s) + epoch por pauseKey ======
 type Pending = { parts: string[]; timer?: NodeJS.Timeout; epoch: number };
 const pendingByKey = new Map<string, Pending>();
@@ -401,7 +400,7 @@ async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: strin
   }
   L('INTENT', { jidRaw, key, product, price, onlyNuezInstr, comboImageKind });
 
-  // ====== Detección + guardado del pedido en CSV ======
+  // ====== Detección + guardado del pedido en CSV (texto libre) ======
   const order = detectOrder(combinedText);
   if (order.isOrder) {
     const row = {
@@ -428,21 +427,13 @@ async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: strin
 
   if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('POST_AI_ABORT', { jidRaw, key }); return; }
 
-  // Imagen combinada si aplica (evitar repetición para info de caps/semillas/gotas)
+  // Imagen combinada si aplica
   if (comboImageKind) {
     const chosen = pickUrl(comboImageKind);
     if (chosen?.url) {
-      // Gate: solo para info de caps/semillas/gotas. No afecta bienvenida, precios ni dosificar.
-      if (isInfoKind(comboImageKind) && alreadySentInfo(jidRaw, comboImageKind)) {
-        L('GATE_INFO_SKIP', { jidRaw, key, kind: comboImageKind });
-      } else {
-        await delay(REPLY_DELAY_MS);
-        if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('IMG_ABORT', { jidRaw, key }); return; }
-        await safeSendMessage(sock, jidRaw, { image: { url: chosen.url }, caption: chosen.caption });
-        if (isInfoKind(comboImageKind)) {
-          markSentInfo(jidRaw, comboImageKind);
-        }
-      }
+      await delay(REPLY_DELAY_MS);
+      if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('IMG_ABORT', { jidRaw, key }); return; }
+      await safeSendMessage(sock, jidRaw, { image: { url: chosen.url }, caption: chosen.caption });
     } else {
       L('IMG_SKIP_NOURL', { jidRaw, key, comboImageKind });
     }
@@ -453,7 +444,7 @@ async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: strin
   if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('TEXT_ABORT', { jidRaw, key }); return; }
   await safeSendMessage(sock, jidRaw, { text: reply });
 
-  // /foto ... explícito dentro del batch (para pruebas) — NO se gatea para permitir forzar envío
+  // /foto ... explícito dentro del batch (para pruebas)
   const fotoCmd = normalize(combinedText).match(/^\/?foto\s+(semillas|capsulas|gotas|precio_semillas|precio_capsulas|precio_gotas|dosificar)\b/);
   if (fotoCmd?.[1]) {
     const extraKind = fotoCmd[1] as ImgKind;
@@ -462,7 +453,6 @@ async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: strin
       await delay(REPLY_DELAY_MS);
       if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('EXTRA_IMG_ABORT', { jidRaw, key }); return; }
       await safeSendMessage(sock, jidRaw, { image: { url: extra.url }, caption: extra.caption });
-      // Nota: no marcamos aquí para que /foto no bloquee futuros envíos automáticos de info
     } else {
       await delay(REPLY_DELAY_MS);
       if (isPausedAny(jidRaw) || pending.epoch !== getEpoch(key)) { L('EXTRA_TEXT_ABORT', { jidRaw, key }); return; }
@@ -557,8 +547,32 @@ export async function iniciarWhatsApp() {
       processedIds.set(messageId, Date.now());
       gcProcessedIds();
 
-      // ===== Comandos owner-only (enviados desde tu propio número / LID) =====
+      // ===== Comportamiento para mensajes ENVIADOS POR EL BOT =====
       if (fromMe) {
+        // 1) Si es el mensaje de confirmación "Resumen: ... <END_CONVERSATION/>" -> guardar al CSV
+        const parsed = parseFinalOrderSummary(text);
+        if (parsed) {
+          const key = pauseKeyFromJid(chatJidRaw);
+          const row = {
+            timestamp_iso: new Date().toISOString(),
+            chat_jid: chatJidRaw,
+            pause_key: key,
+            product_intent: parsed.product || '',
+            price_intent: 'no',
+            quantity_guess: parsed.qty || '',
+            has_address_hint: 'yes',
+            raw_text: text
+          };
+          try {
+            await appendOrderCsv(row);
+            L('ORDER_FINAL_LOGGED', { chatJidRaw, key, row });
+          } catch (e) {
+            L('ORDER_FINAL_ERR', { error: (e as Error)?.message });
+          }
+          // No retorno: por si además querés que siga evaluando comandos (abajo).
+        }
+
+        // ===== Comandos owner-only (enviados desde tu número / LID) =====
         const t = normalize(text);
         L('CMD_CHECK', { chatJidRaw, t });
 
@@ -609,6 +623,8 @@ export async function iniciarWhatsApp() {
         L('SELF_SKIP', { chatJidRaw });
         return;
       }
+
+      // ===== Mensajes entrantes (usuario) =====
 
       // Actualizar último chat entrante (para comandos sin número)
       lastInboundChatRaw = chatJidRaw;
