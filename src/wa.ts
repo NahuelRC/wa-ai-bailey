@@ -6,7 +6,6 @@ import makeWASocket, {
   proto
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
-import fetch from 'node-fetch';
 import path from 'path';
 import { aiReply } from './ai.js';
 import { promises as fsp } from 'fs';
