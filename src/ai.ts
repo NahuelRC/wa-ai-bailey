@@ -1,4 +1,3 @@
-import fetch from 'node-fetch';
 import { cfg } from './config.js';
 import { loadSystemPrompt, ensureSystemPromptInitialized } from './promptStore.js';
 import { appendConversationTurn, getRecentConversationHistoryForUser } from './conversationStore.js';
@@ -107,7 +106,14 @@ export async function aiReply(userText: string, phone: string, history: string =
   }
 
   const dbHistory = previousTurns.length
-    ? previousTurns.map((turn) => `U: ${turn.userText}\nA: ${turn.aiText}`).join('\n')
+    ? previousTurns
+        .flatMap((turn: { userText?: string; aiText?: string }) => {
+          const lines: string[] = [];
+          if (turn.userText) lines.push(`U: ${turn.userText}`);
+          if (turn.aiText) lines.push(`A: ${turn.aiText}`);
+          return lines;
+        })
+        .join('\n')
     : '';
   const historyForPrompt = history?.trim() ? history : dbHistory;
 
