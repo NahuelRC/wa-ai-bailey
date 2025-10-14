@@ -17,7 +17,10 @@ public/qr.png
 
 scripts/
 
+/data
 /auth
 /.wadata
 .env
 public/qr.png.env
+/local
+/Users/nahue/Workspace/wa-ai-bailey/C:\Users\nahue\AppData\Local\wa-auth

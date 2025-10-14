@@ -1,19 +1,13 @@
 import { cfg } from './config.js';
 import { createRoutes } from './routes.js';
 import { iniciarWhatsApp } from './wa.js';
-import * as path from 'path';
-import * as fs from 'fs';
 import { acquireProcessLock, releaseProcessLock } from './lock.js' ;
-
-function resolveSessionDir() {
-  const envDir = process.env.WA_SESSION_DIR;
-  if (envDir && envDir.trim()) return envDir.trim();
-  return path.join(process.cwd(), '.wadata'); // para el lock
-}
+import { clearSessionData, ensureSessionDirs, getSessionDir } from './sessionManager.js';
+import { closeMongo } from './db.js';
 
 async function main() {
-  const sessionDir = resolveSessionDir();
-  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionDir = getSessionDir();
+  ensureSessionDirs();
   console.log(`[SESSION] usando carpeta: ${sessionDir}`);
 
   const { ok, lockPath } = acquireProcessLock(sessionDir);
@@ -21,7 +15,11 @@ async function main() {
     console.error('Ya hay otra instancia usando esta sesión. Cerrando.');
     process.exit(1);
   }
-  const release = () => { try { releaseProcessLock(lockPath); } catch {} };
+  const release = () => {
+    try { releaseProcessLock(lockPath); } catch {}
+    try { clearSessionData(); } catch {}
+    closeMongo().catch(() => {});
+  };
   process.on('exit', release);
   process.on('SIGINT', () => { release(); process.exit(0); });
   process.on('SIGTERM', () => { release(); process.exit(0); });

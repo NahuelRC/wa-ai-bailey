@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Panel de Agentes</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="auth-view" class="auth-view">
+      <div class="auth-card">
+        <div class="auth-brand">Ai Sales Pro</div>
+        <div class="auth-tabs">
+          <button class="auth-tab active" data-tab="login">Iniciar sesión</button>
+          <button class="auth-tab" data-tab="register">Crear cuenta</button>
+        </div>
+        <form id="login-form" class="auth-form" autocomplete="on">
+          <label>
+            Usuario
+            <input type="text" name="username" required minlength="3" placeholder="tu.usuario" />
+          </label>
+          <label>
+            Contraseña
+            <input type="password" name="password" required minlength="6" placeholder="••••••" />
+          </label>
+          <button type="submit" class="primary-button">Ingresar</button>
+        </form>
+        <form id="register-form" class="auth-form hidden" autocomplete="off">
+          <label>
+            Usuario
+            <input type="text" name="username" required minlength="3" placeholder="nuevo.usuario" />
+          </label>
+          <label>
+            Contraseña
+            <input type="password" name="password" required minlength="6" placeholder="Mínimo 6 caracteres" />
+          </label>
+          <button type="submit" class="primary-button">Crear cuenta</button>
+        </form>
+        <p id="auth-message" class="auth-message"></p>
+      </div>
+    </div>
+
+    <div id="app" class="app hidden">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div class="brand-icon">🤖</div>
+          <div class="brand-text">
+            <span class="brand-title">Ai Sales Pro</span>
+            <span class="brand-sub">Panel de agentes</span>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-view="qr-view">
+            <span class="nav-icon">📷</span>
+            <span class="nav-text">QR de sesión</span>
+          </button>
+          <button class="nav-item" data-view="agent-view">
+            <span class="nav-icon">🧠</span>
+            <span class="nav-text">Agente</span>
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <button id="logout-button" class="logout-button">Cerrar sesión</button>
+        </div>
+      </aside>
+
+      <div class="main">
+        <header class="main-header">
+          <div>
+            <h1 id="view-title">QR de sesión</h1>
+            <p class="subtitle">Gestiona la experiencia de tu agente y comparte tu sesión de forma segura.</p>
+          </div>
+          <div class="user-chip">
+            <div class="user-avatar" id="user-avatar">U</div>
+            <div>
+              <div id="user-name" class="user-name">Usuario</div>
+              <small id="user-created" class="user-meta"></small>
+            </div>
+          </div>
+        </header>
+
+        <main class="content">
+          <section id="qr-view" class="view active">
+            <div class="card qr-card">
+              <h2>Tu código QR</h2>
+              <p class="card-description">Escanéalo para vincular la sesión del agente.</p>
+              <div class="qr-wrapper" id="qr-wrapper">
+                <div class="qr-loader" id="qr-loader"></div>
+              </div>
+              <p id="qr-meta" class="qr-meta"></p>
+              <div class="qr-actions">
+                <button id="refresh-qr" class="secondary-button">Actualizar QR</button>
+                <button id="wa-logout" class="danger-button">Cerrar sesión de WhatsApp</button>
+              </div>
+            </div>
+            <div class="card info-card">
+              <h3>Consejos de seguridad</h3>
+              <ul>
+                <li>Comparte el QR solo con agentes autorizados.</li>
+                <li>Cambia tu prompt cuando actualices el objetivo de la campaña.</li>
+                <li>Si notas actividad sospechosa, cierra sesión inmediatamente.</li>
+              </ul>
+            </div>
+          </section>
+
+          <section id="agent-view" class="view">
+            <div class="card agent-card">
+              <div class="card-header">
+                <div>
+                  <h2>Configuración del agente</h2>
+                  <p class="card-description">Define el prompt que utilizará el agente asociado a tu QR.</p>
+                </div>
+                <span class="status-pill">Activo</span>
+              </div>
+              <label class="textarea-label" for="prompt-input">Prompt del agente</label>
+              <textarea id="prompt-input" rows="8" placeholder="Describe la personalidad y objetivos de tu agente..."></textarea>
+              <div class="actions">
+                <button id="save-prompt" class="primary-button">Guardar cambios</button>
+                <span id="prompt-feedback" class="form-feedback"></span>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <template id="toast-template">
+      <div class="toast"></div>
+    </template>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

@@ -1,25 +1,178 @@
 // routes.ts
-import express from 'express';
+import express, { NextFunction, Request, Response, RequestHandler } from 'express';
 import path from 'path';
 
+import { cfg } from './config.js';
+import { signJwt, verifyJwt } from './jwt.js';
+import {
+  createUser,
+  findUserById,
+  findUserByUsername,
+  toPublicUser,
+  updateUserPrompt,
+  verifyUserPassword,
+} from './userStore.js';
+import type { StoredUser } from './userStore.js';
+import { clearSessionData, ensureSessionDirs } from './sessionManager.js';
+import { getNextAllowedUpdateAt, getWhatsAppQr, MIN_REFRESH_MS } from './qrState.js';
+import { iniciarWhatsApp, logoutWhatsApp } from './wa.js';
+import { ensureSystemPromptInitialized, loadSystemPrompt } from './promptStore.js';
+
+interface AuthenticatedRequest extends Request {
+  authUserId?: string;
+  authUser?: StoredUser;
+}
+
+function sendError(res: Response, status: number, message: string) {
+  res.status(status).json({ ok: false, message });
+}
+
+function createToken(userId: string, username: string) {
+  const expiresInSeconds = cfg.JWT_EXPIRES_IN_HOURS * 3600;
+  return signJwt({ sub: userId, username }, cfg.JWT_SECRET, expiresInSeconds);
+}
+
+const requireAuth: RequestHandler = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+      return sendError(res, 401, 'Token no provisto');
+    }
+
+    const token = header.slice('Bearer '.length).trim();
+    const result = verifyJwt(token, cfg.JWT_SECRET);
+    if (!result.valid) {
+      return sendError(res, 401, result.error);
+    }
+
+    const user = await findUserById(result.payload.sub);
+    if (!user) {
+      return sendError(res, 401, 'Usuario no encontrado');
+    }
+
+    req.authUserId = user.id;
+    req.authUser = user;
+    next();
+  } catch (err) {
+    console.error('Error en autenticación', err);
+    sendError(res, 500, 'Error de autenticación');
+  }
+};
+
 export function createRoutes() {
-  const app = express() ;
+  const app = express();
+
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => res.send('ok'));
 
-  // Servir carpeta public (qr.png estará ahí)
-  app.use(express.static(path.join(process.cwd(), 'public')));
+  app.post('/api/register', async (req: Request, res: Response) => {
+    const { username, password } = req.body ?? {};
+    if (typeof username !== 'string' || username.trim().length < 3) {
+      return sendError(res, 400, 'El usuario debe tener al menos 3 caracteres');
+    }
+    if (typeof password !== 'string' || password.length < 6) {
+      return sendError(res, 400, 'La contraseña debe tener al menos 6 caracteres');
+    }
 
-  // Endpoint /qr (redirige a la imagen)
-  app.get('/qr', (_req, res) => {
-    res.send(`
-      <html>
-        <body style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;font-family:sans-serif;">
-          <h2>Escaneá este QR en WhatsApp</h2>
-          <img src="/qr.png" alt="QR de WhatsApp" />
-        </body>
-      </html>
-    `);
+    try {
+      const user = await createUser(username.trim(), password);
+      const token = createToken(user.id, user.username);
+      res.status(201).json({ ok: true, token, user: toPublicUser(user) });
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('existe')) {
+        return sendError(res, 409, err.message);
+      }
+      return sendError(res, 500, 'No se pudo crear el usuario');
+    }
+  });
+
+  app.post('/api/login', async (req: Request, res: Response) => {
+    const { username, password } = req.body ?? {};
+    if (typeof username !== 'string' || typeof password !== 'string') {
+      return sendError(res, 400, 'Credenciales inválidas');
+    }
+
+    const user = await findUserByUsername(username.trim());
+    if (!user) {
+      return sendError(res, 401, 'Usuario o contraseña incorrectos');
+    }
+
+    if (!(await verifyUserPassword(user, password))) {
+      return sendError(res, 401, 'Usuario o contraseña incorrectos');
+    }
+
+    const token = createToken(user.id, user.username);
+    res.json({ ok: true, token, user: toPublicUser(user) });
+  });
+
+  app.get('/api/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser as StoredUser;
+    res.json({ ok: true, user: toPublicUser(user) });
+  });
+
+  app.get('/api/me/qr', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+    const current = getWhatsAppQr();
+    if (!current) {
+      return sendError(res, 503, 'QR no disponible todavía');
+    }
+    res.json({
+      ok: true,
+      qr: current.dataUrl,
+      format: 'image',
+      updatedAt: current.updatedAt,
+      nextRefreshAt: getNextAllowedUpdateAt(),
+      minRefreshMs: MIN_REFRESH_MS,
+    });
+  });
+
+  app.put('/api/me/prompt', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser as StoredUser;
+    const { prompt } = req.body ?? {};
+    if (typeof prompt !== 'string') {
+      return sendError(res, 400, 'Prompt inválido');
+    }
+
+    const cleanPrompt = prompt.trim();
+    const updated = await updateUserPrompt(user.id, cleanPrompt);
+    if (!updated) {
+      return sendError(res, 500, 'No se pudo actualizar el prompt');
+    }
+
+    res.json({ ok: true, user: toPublicUser(updated) });
+  });
+
+  app.get('/api/prompt/system', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = req.authUser as StoredUser;
+      await ensureSystemPromptInitialized(user.id);
+      const prompt = await loadSystemPrompt(user.id);
+      res.json({ ok: true, prompt });
+    } catch (err) {
+      console.error('No se pudo cargar el prompt del sistema', err);
+      sendError(res, 500, 'No se pudo cargar el prompt del sistema');
+    }
+  });
+
+  app.post('/api/logout', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
+    try {
+      await logoutWhatsApp();
+      clearSessionData();
+      ensureSessionDirs();
+      iniciarWhatsApp().catch(err => console.error('No se pudo reiniciar WhatsApp', err));
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Error al cerrar sesión', err);
+      sendError(res, 500, 'No se pudo cerrar sesión');
+    }
+  });
+
+  // Servir carpeta public (incluye la app web)
+  const publicDir = path.join(process.cwd(), 'public');
+  app.use(express.static(publicDir));
+
+  app.use((_req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
   });
 
   return app;
