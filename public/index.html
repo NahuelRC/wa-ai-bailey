@@ -58,6 +58,10 @@
             <span class="nav-icon">🧠</span>
             <span class="nav-text">Agente</span>
           </button>
+          <button class="nav-item" data-view="conversations-view">
+            <span class="nav-icon">💬</span>
+            <span class="nav-text">Conversaciones</span>
+          </button>
         </nav>
         <div class="sidebar-footer">
           <button id="logout-button" class="logout-button">Cerrar sesión</button>
@@ -118,6 +122,26 @@
                 <button id="save-prompt" class="primary-button">Guardar cambios</button>
                 <span id="prompt-feedback" class="form-feedback"></span>
               </div>
+            </div>
+          </section>
+
+          <section id="conversations-view" class="view">
+            <div class="card conversations-card">
+              <div class="card-header">
+                <div>
+                  <h2>Conversaciones</h2>
+                  <p class="card-description">Activa o pausa conversaciones en curso.</p>
+                </div>
+                <button id="refresh-conversations" class="secondary-button">Actualizar</button>
+              </div>
+              <div class="conversation-toolbar">
+                <label class="conversation-search">
+                  <span>Buscar por teléfono</span>
+                  <input type="text" id="conversation-filter" placeholder="Ej: 5493416…" />
+                </label>
+              </div>
+              <div id="conversations-list" class="conversation-list"></div>
+              <p id="conversations-empty" class="empty-state hidden">No hay conversaciones registradas.</p>
             </div>
           </section>
         </main>

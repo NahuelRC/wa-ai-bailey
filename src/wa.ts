@@ -628,3 +628,12 @@ export async function logoutWhatsApp() {
   initializingPromise = null;
   clearWhatsAppQr();
 }
+
+export function isConversationPaused(jidRaw: string): boolean {
+  return isPausedAny(jidRaw);
+}
+
+export function setConversationPaused(jidRaw: string, paused: boolean) {
+  if (paused) setPaused(jidRaw);
+  else clearPaused(jidRaw);
+}
