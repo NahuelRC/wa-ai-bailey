@@ -24,5 +24,16 @@ export const cfg = {
   WA_SESSION_DIR: process.env.WA_SESSION_DIR ?? '',
   DISABLE_HUMAN_MUTE: process.env.DISABLE_HUMAN_MUTE === '1',
   DISABLE_BUSINESS_HOURS: process.env.DISABLE_BUSINESS_HOURS === '1',
-  WEB_VERSION: process.env.WEB_VERSION ?? ''
+  WEB_VERSION: process.env.WEB_VERSION ?? '',
+
+  // Auth
+  JWT_SECRET: process.env.JWT_SECRET && process.env.JWT_SECRET.trim() !== ''
+    ? process.env.JWT_SECRET.trim()
+    : 'cambia-este-secreto',
+  JWT_EXPIRES_IN_HOURS: num(process.env.JWT_EXPIRES_IN_HOURS, 12),
+
+  // MongoDB
+  MONGO_URI: process.env.MONGO_URI ?? '',
+  MONGO_DB_NAME: process.env.MONGO_DB_NAME ?? 'wa-ai',
+  MONGO_PROMPT_ID: process.env.MONGO_PROMPT_ID ?? 'systemPrompt'
 } as const;

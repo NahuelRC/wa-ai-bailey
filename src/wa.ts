@@ -10,10 +10,15 @@ import fetch from 'node-fetch';
 import path from 'path';
 import { aiReply } from './ai.js';
 import { promises as fsp } from 'fs';
+import { clearWhatsAppQr, updateWhatsAppQr } from './qrState.js';
+import { getAuthDir } from './sessionManager.js';
 
 // ====== Config de espera entre respuestas ======
 const REPLY_DELAY_MS = 1_000;
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+let activeSock: ReturnType<typeof makeWASocket> | null = null;
+let initializingPromise: Promise<ReturnType<typeof makeWASocket>> | null = null;
 
 // ====== Logger ======
 function L(scope: string, obj: any) {
@@ -492,102 +497,134 @@ function enqueueMessageForChat(sock: ReturnType<typeof makeWASocket>, jidRaw: st
 
 // ================================================
 export async function iniciarWhatsApp() {
-  const AUTH_DIR =
-    process.env.WA_AUTH_DIR?.trim() ||
-    process.env.WA_SESSION_DIR?.trim() ||
-    path.join(process.cwd(), 'auth');
+  if (initializingPromise) {
+    return initializingPromise;
+  }
 
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+  initializingPromise = (async () => {
+    const AUTH_DIR = getAuthDir();
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version } = await fetchLatestBaileysVersion();
 
-  const sock = makeWASocket({ version, auth: state, printQRInTerminal: false });
-  console.log(`[AUTH] usando carpeta de sesión: ${AUTH_DIR}`);
+    const sock = makeWASocket({ version, auth: state, printQRInTerminal: false });
+    activeSock = sock;
+    console.log(`[AUTH] usando carpeta de sesión: ${AUTH_DIR}`);
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      console.log('Escaneá este QR para vincular tu sesión:');
-      qrcode.generate(qr, { small: true });
-    }
-    if (connection === 'open') {
-      console.log('✅ Conectado a WhatsApp');
-    } else if (connection === 'close') {
-      const code = (lastDisconnect?.error as any)?.output?.statusCode;
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.warn('Conexión cerrada. Código:', code, 'Reintentar:', shouldReconnect);
-      if (shouldReconnect) void iniciarWhatsApp();
-      else console.error('Sesión cerrada (logged out). Borra la carpeta de sesión para re-vincular.');
-    }
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  // Mensajes entrantes
-  sock.ev.on('messages.upsert', async (m) => {
-    try {
-      gcPaused();
-      gcTranscripts();
-
-      if (m.type !== 'notify') return;
-
-      const msg = m.messages?.[0];
-      if (!msg || !msg.message) return;
-
-      const chatJidRaw = msg.key.remoteJid || '';
-      if (!chatJidRaw || chatJidRaw === 'status@broadcast') return;
-
-      const fromMe = !!msg.key.fromMe;
-      const text = getTextFromMessage(msg.message).trim();
-      const messageId = msg.key.id || `${chatJidRaw}:${Date.now()}`;
-
-      L('MSG_IN', { messageId, chatJidRaw, fromMe, text });
-      if (!text) return;
-
-      // Dedup
-      if (processedIds.has(messageId)) { L('DEDUP_SKIP', { messageId }); return; }
-      processedIds.set(messageId, Date.now());
-      gcProcessedIds();
-
-      // Comandos owner-only (enviados desde tu propio número)
-      if (fromMe) {
-        const t = normalize(text);
-        L('CMD_CHECK', { chatJidRaw, t });
-
-        if (/^\/?\s*bot(?:-|\s*)pause\b/.test(t)) {
-          const digits = (t.match(/\d{7,}/g) || [])[0];
-          const targetJidRaw = digits ? `${digits}@s.whatsapp.net` : chatJidRaw;
-          setPaused(targetJidRaw);
-          const targetKey = pauseKeyFromJid(targetJidRaw);
-          const pending = pendingByKey.get(targetKey);
-          if (pending?.timer) clearTimeout(pending.timer);
-          pendingByKey.delete(targetKey);
-          await delay(REPLY_DELAY_MS);
-          await safeSendMessage(sock, chatJidRaw, { text: `🛑 Bot pausado por 2 horas en ${targetJidRaw}.` });
-          return;
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        console.log('Escaneá este QR para vincular tu sesión:');
+        qrcode.generate(qr, { small: true });
+        try {
+          await updateWhatsAppQr(qr);
+        } catch (err) {
+          console.error('No se pudo preparar el QR para la web', err);
         }
-        if (/^\/?\s*bot(?:-|\s*)play\b/.test(t)) {
-          const digits = (t.match(/\d{7,}/g) || [])[0];
-          const targetJidRaw = digits ? `${digits}@s.whatsapp.net` : chatJidRaw;
-          clearPaused(targetJidRaw);
-          await delay(REPLY_DELAY_MS);
-          await safeSendMessage(sock, chatJidRaw, { text: `▶️ Bot reanudado en ${targetJidRaw}.` });
-          return;
-        }
-
-        // no auto-responder mis mensajes
-        return;
       }
+      if (connection === 'open') {
+        console.log('✅ Conectado a WhatsApp');
+        clearWhatsAppQr();
+      } else if (connection === 'close') {
+        const code = (lastDisconnect?.error as any)?.output?.statusCode;
+        const shouldReconnect = code !== DisconnectReason.loggedOut;
+        console.warn('Conexión cerrada. Código:', code, 'Reintentar:', shouldReconnect);
+        clearWhatsAppQr();
+        if (!shouldReconnect) {
+          activeSock = null;
+        }
+        if (shouldReconnect) void iniciarWhatsApp();
+        else console.error('Sesión cerrada (logged out). Borra la carpeta de sesión para re-vincular.');
+      }
+    });
 
-      if (isPausedAny(chatJidRaw)) { L('MSG_SKIP_PAUSED', { chatJidRaw }); return; }
+    sock.ev.on('creds.update', saveCreds);
 
-      // Encolar para batch
-      enqueueMessageForChat(sock, chatJidRaw, text);
+    // Mensajes entrantes
+    sock.ev.on('messages.upsert', async (m) => {
+      try {
+        gcPaused();
+        gcTranscripts();
 
-    } catch (err: any) {
-      console.error('Error en messages.upsert:', err?.message || err);
-      L('MSG_ERR', { error: err?.message || String(err) });
+        if (m.type !== 'notify') return;
+
+        const msg = m.messages?.[0];
+        if (!msg || !msg.message) return;
+
+        const chatJidRaw = msg.key.remoteJid || '';
+        if (!chatJidRaw || chatJidRaw === 'status@broadcast') return;
+
+        const fromMe = !!msg.key.fromMe;
+        const text = getTextFromMessage(msg.message).trim();
+        const messageId = msg.key.id || `${chatJidRaw}:${Date.now()}`;
+
+        L('MSG_IN', { messageId, chatJidRaw, fromMe, text });
+        if (!text) return;
+
+        // Dedup
+        if (processedIds.has(messageId)) { L('DEDUP_SKIP', { messageId }); return; }
+        processedIds.set(messageId, Date.now());
+        gcProcessedIds();
+
+        // Comandos owner-only (enviados desde tu propio número)
+        if (fromMe) {
+          const t = normalize(text);
+          L('CMD_CHECK', { chatJidRaw, t });
+
+          if (/^\/?\s*bot(?:-|\s*)pause\b/.test(t)) {
+            const digits = (t.match(/\d{7,}/g) || [])[0];
+            const targetJidRaw = digits ? `${digits}@s.whatsapp.net` : chatJidRaw;
+            setPaused(targetJidRaw);
+            const targetKey = pauseKeyFromJid(targetJidRaw);
+            const pending = pendingByKey.get(targetKey);
+            if (pending?.timer) clearTimeout(pending.timer);
+            pendingByKey.delete(targetKey);
+            await delay(REPLY_DELAY_MS);
+            await safeSendMessage(sock, chatJidRaw, { text: `🛑 Bot pausado por 2 horas en ${targetJidRaw}.` });
+            return;
+          }
+          if (/^\/?\s*bot(?:-|\s*)play\b/.test(t)) {
+            const digits = (t.match(/\d{7,}/g) || [])[0];
+            const targetJidRaw = digits ? `${digits}@s.whatsapp.net` : chatJidRaw;
+            clearPaused(targetJidRaw);
+            await delay(REPLY_DELAY_MS);
+            await safeSendMessage(sock, chatJidRaw, { text: `▶️ Bot reanudado en ${targetJidRaw}.` });
+            return;
+          }
+
+          // no auto-responder mis mensajes
+          return;
+        }
+
+        if (isPausedAny(chatJidRaw)) { L('MSG_SKIP_PAUSED', { chatJidRaw }); return; }
+
+        // Encolar para batch
+        enqueueMessageForChat(sock, chatJidRaw, text);
+
+      } catch (err: any) {
+        console.error('Error en messages.upsert:', err?.message || err);
+        L('MSG_ERR', { error: err?.message || String(err) });
+      }
+    });
+
+    return sock;
+  })();
+
+  try {
+    return await initializingPromise;
+  } finally {
+    initializingPromise = null;
+  }
+}
+
+export async function logoutWhatsApp() {
+  if (activeSock) {
+    try {
+      await activeSock.logout();
+    } catch (err) {
+      console.warn('No se pudo cerrar sesión de WhatsApp', err);
     }
-  });
-
-  return sock;
+  }
+  activeSock = null;
+  initializingPromise = null;
+  clearWhatsAppQr();
 }
