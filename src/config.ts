@@ -10,7 +10,7 @@ export const cfg = {
 
   // OpenAI
   OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? '',
-  OPENAI_MODEL: (process.env.OPENAI_MODEL ?? 'gpt-4o-mini').trim(),
+  OPENAI_MODEL: (process.env.OPENAI_MODEL ?? 'gpt-4.1-mini').trim(),
   OPENAI_BASE_URL: (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com').replace(/\/+$/, ''),
 
   // Imágenes (mantengo tus nombres)
