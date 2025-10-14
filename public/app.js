@@ -19,6 +19,21 @@ const logoutButton = document.getElementById('logout-button');
 const refreshQr = document.getElementById('refresh-qr');
 const waLogoutButton = document.getElementById('wa-logout');
 const qrMetaLabel = document.getElementById('qr-meta');
+const conversationsList = document.getElementById('conversations-list');
+const conversationsEmpty = document.getElementById('conversations-empty');
+const refreshConversations = document.getElementById('refresh-conversations');
+const conversationsFilter = document.getElementById('conversation-filter');
+
+const VIEW_TITLES = {
+  'qr-view': 'QR de sesión',
+  'agent-view': 'Agente',
+  'conversations-view': 'Conversaciones'
+};
+
+const dateTimeFormatter = new Intl.DateTimeFormat('es-AR', {
+  dateStyle: 'short',
+  timeStyle: 'short'
+});
 
 const qrState = {
   nextRefreshAt: 0,
@@ -28,6 +43,9 @@ const qrState = {
 
 let currentView = 'qr-view';
 let currentUser = null;
+let conversationsLoading = false;
+let conversationsData = [];
+let filteredConversations = [];
 
 function setToken(token) {
   if (token) {
@@ -120,6 +138,8 @@ function showAuthView() {
   qrState.minRefreshMs = 0;
   qrState.updatedAt = 0;
   if (qrMetaLabel) qrMetaLabel.textContent = '';
+  if (conversationsList) conversationsList.innerHTML = '';
+  if (conversationsEmpty) conversationsEmpty.classList.add('hidden');
 }
 
 function formatTimeLabel(timestamp) {
@@ -194,6 +214,101 @@ async function loadQr() {
   }
 }
 
+function formatDateTime(iso) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return dateTimeFormatter.format(date);
+}
+
+function applyConversationFilter(items) {
+  const term = conversationsFilter?.value?.trim() || '';
+  if (!term) return [...items];
+  const lower = term.toLowerCase();
+  return items.filter(item => {
+    const phone = item.phoneNumber || item.phone || '';
+    return phone.toLowerCase().includes(lower);
+  });
+}
+
+function renderConversations(items = []) {
+  if (!conversationsList) return;
+  conversationsData = items;
+  const viewItems = applyConversationFilter(items);
+  filteredConversations = viewItems;
+  conversationsList.innerHTML = '';
+  if (!viewItems.length) {
+    if (conversationsEmpty) conversationsEmpty.classList.remove('hidden');
+    return;
+  }
+  if (conversationsEmpty) conversationsEmpty.classList.add('hidden');
+
+  viewItems.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'conversation-item';
+
+    const info = document.createElement('div');
+    info.className = 'conversation-info';
+
+    const phoneEl = document.createElement('div');
+    phoneEl.className = 'conversation-phone';
+    phoneEl.textContent = item.phoneNumber || item.phone || 'Desconocido';
+    info.appendChild(phoneEl);
+
+    const updatedEl = document.createElement('div');
+    updatedEl.className = 'conversation-updated';
+    updatedEl.textContent = item.updatedAt
+      ? `Actualizado ${formatDateTime(item.updatedAt)}`
+      : 'Sin actividad reciente';
+    info.appendChild(updatedEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'conversation-actions';
+
+    const status = document.createElement('span');
+    status.className = 'conversation-status';
+    if (item.paused) status.classList.add('paused');
+    status.textContent = item.paused ? 'Pausada' : 'Activa';
+    actions.appendChild(status);
+
+    const toggle = document.createElement('label');
+    toggle.className = 'toggle';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = 'conversation-toggle';
+    input.dataset.phone = item.phone;
+    input.checked = !item.paused;
+    toggle.appendChild(input);
+    const slider = document.createElement('span');
+    toggle.appendChild(slider);
+    actions.appendChild(toggle);
+
+    row.appendChild(info);
+    row.appendChild(actions);
+    conversationsList.appendChild(row);
+  });
+}
+
+async function loadConversations(force = false) {
+  if (!conversationsList) return;
+  if (conversationsLoading) {
+    if (!force) return;
+  }
+  conversationsLoading = true;
+  try {
+    const { conversations } = await api('/api/conversations');
+    const items = Array.isArray(conversations) ? conversations : [];
+    renderConversations(items);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'No se pudieron cargar las conversaciones';
+    if (!/token/i.test(message)) {
+      showToast(message, 'error');
+    }
+  } finally {
+    conversationsLoading = false;
+  }
+}
+
 async function savePrompt() {
   promptFeedback.textContent = '';
   promptFeedback.style.color = '';
@@ -213,15 +328,22 @@ async function savePrompt() {
 }
 
 function switchView(viewId) {
-  if (currentView === viewId) return;
+  if (currentView === viewId) {
+    if (viewId === 'conversations-view') {
+      loadConversations(true);
+    }
+    return;
+  }
   currentView = viewId;
   document.querySelectorAll('.view').forEach(section => {
     section.classList.toggle('active', section.id === viewId);
   });
   navItems.forEach(item => item.classList.toggle('active', item.dataset.view === viewId));
-  viewTitle.textContent = viewId === 'qr-view' ? 'QR de sesión' : 'Agente';
+  viewTitle.textContent = VIEW_TITLES[viewId] || 'Panel';
   if (viewId === 'qr-view') {
     loadQr();
+  } else if (viewId === 'conversations-view') {
+    loadConversations();
   }
 }
 
@@ -248,6 +370,7 @@ async function handleAuthSubmit(event, mode) {
     updateUserUI(data.user);
     showAppView();
     loadQr();
+    loadConversations();
     authMessage.textContent = '';
     showToast(mode === 'login' ? 'Bienvenido de nuevo 👋' : 'Cuenta creada con éxito 🎉', 'success');
   } catch (err) {
@@ -311,6 +434,42 @@ function setupEventListeners() {
     });
   }
 
+  if (refreshConversations) {
+    refreshConversations.addEventListener('click', () => loadConversations(true));
+  }
+
+  if (conversationsFilter) {
+    conversationsFilter.addEventListener('input', () => {
+      renderConversations(conversationsData);
+    });
+  }
+
+  if (conversationsList) {
+    conversationsList.addEventListener('change', async event => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      if (!target.classList.contains('conversation-toggle')) return;
+      const phone = target.dataset.phone;
+      if (!phone) return;
+      const shouldPause = !target.checked;
+      target.disabled = true;
+      try {
+        await api('/api/conversations/toggle', {
+          method: 'POST',
+          body: JSON.stringify({ phone, paused: shouldPause })
+        });
+        await loadConversations(true);
+        showToast(shouldPause ? 'Conversación pausada' : 'Conversación activada', 'success');
+      } catch (err) {
+        target.checked = !target.checked;
+        const message = err instanceof Error ? err.message : 'No se pudo actualizar la conversación';
+        showToast(message, 'error');
+      } finally {
+        target.disabled = false;
+      }
+    });
+  }
+
   document.getElementById('save-prompt').addEventListener('click', event => {
     event.preventDefault();
     savePrompt();
@@ -325,6 +484,7 @@ async function bootstrap() {
       await loadUser();
       showAppView();
       loadQr();
+      loadConversations();
       switchView('qr-view');
     } catch {
       setToken(null);

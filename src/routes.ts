@@ -15,8 +15,10 @@ import {
 import type { StoredUser } from './userStore.js';
 import { clearSessionData, ensureSessionDirs } from './sessionManager.js';
 import { getNextAllowedUpdateAt, getWhatsAppQr, MIN_REFRESH_MS } from './qrState.js';
-import { iniciarWhatsApp, logoutWhatsApp } from './wa.js';
-import { ensureSystemPromptInitialized, loadSystemPrompt } from './promptStore.js';
+import { iniciarWhatsApp, logoutWhatsApp, isConversationPaused, setConversationPaused } from './wa.js';
+import { ensureSystemPromptInitialized, loadSystemPrompt, saveSystemPrompt } from './promptStore.js';
+import { invalidateSystemPromptCache } from './ai.js';
+import { listConversationsForUser, getConversationForUser, setConversationPausedInDb } from './conversationStore.js';
 
 interface AuthenticatedRequest extends Request {
   authUserId?: string;
@@ -139,6 +141,13 @@ export function createRoutes() {
       return sendError(res, 500, 'No se pudo actualizar el prompt');
     }
 
+    try {
+      await saveSystemPrompt(cleanPrompt, user.id);
+      invalidateSystemPromptCache(user.id);
+    } catch (err) {
+      console.error('No se pudo actualizar el prompt del sistema en Mongo', err);
+    }
+
     res.json({ ok: true, user: toPublicUser(updated) });
   });
 
@@ -151,6 +160,64 @@ export function createRoutes() {
     } catch (err) {
       console.error('No se pudo cargar el prompt del sistema', err);
       sendError(res, 500, 'No se pudo cargar el prompt del sistema');
+    }
+  });
+
+  app.get('/api/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = req.authUser as StoredUser;
+      const conversations = await listConversationsForUser(user.id);
+      const payload = conversations.map(conv => {
+        const phone = conv.phone;
+        const phoneNumber = phone?.includes('@') ? phone.split('@')[0] : phone;
+        const lastTurn = conv.lastTurn;
+        const lastMessage = lastTurn?.aiText || lastTurn?.userText || '';
+        const lastDirection = lastTurn?.aiText ? 'assistant' : lastTurn?.userText ? 'user' : null;
+        const updatedAt = conv.updatedAt ? conv.updatedAt.toISOString() : null;
+        const createdAt = conv.createdAt ? conv.createdAt.toISOString() : null;
+        const storedPaused = conv.paused ?? false;
+        return {
+          phone,
+          phoneNumber,
+          lastMessage,
+          lastDirection,
+          updatedAt,
+          createdAt,
+          paused: storedPaused,
+          runtimePaused: phone ? isConversationPaused(phone) : storedPaused,
+        };
+      });
+      res.json({ ok: true, conversations: payload });
+    } catch (err) {
+      console.error('No se pudieron listar conversaciones', err);
+      sendError(res, 500, 'No se pudieron listar las conversaciones');
+    }
+  });
+
+  app.post('/api/conversations/toggle', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { phone, paused } = req.body ?? {};
+      if (typeof phone !== 'string' || !phone.trim()) {
+        return sendError(res, 400, 'Conversación inválida');
+      }
+      const phoneId = phone.trim();
+      const user = req.authUser as StoredUser;
+      const convo = await getConversationForUser(user.id, phoneId);
+      if (!convo) {
+        return sendError(res, 404, 'Conversación no encontrada');
+      }
+
+      const shouldPause = paused === true || paused === 'true' || paused === 1 || paused === '1';
+      const saved = await setConversationPausedInDb(user.id, phoneId, shouldPause);
+      if (!saved) {
+        return sendError(res, 500, 'No se pudo actualizar la conversación');
+      }
+
+      setConversationPaused(phoneId, shouldPause);
+      res.json({ ok: true, phone: phoneId, paused: shouldPause, runtimePaused: isConversationPaused(phoneId) });
+    } catch (err) {
+      console.error('No se pudo actualizar el estado de la conversación', err);
+      sendError(res, 500, 'No se pudo actualizar la conversación');
     }
   });
 
