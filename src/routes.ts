@@ -177,6 +177,7 @@ export function createRoutes() {
         const createdAt = conv.createdAt ? conv.createdAt.toISOString() : null;
         const storedPaused = conv.paused ?? false;
         return {
+          userId: conv.userId,
           phone,
           phoneNumber,
           lastMessage,
@@ -214,7 +215,13 @@ export function createRoutes() {
       }
 
       setConversationPaused(phoneId, shouldPause);
-      res.json({ ok: true, phone: phoneId, paused: shouldPause, runtimePaused: isConversationPaused(phoneId) });
+      res.json({
+        ok: true,
+        userId: user.id,
+        phone: phoneId,
+        paused: shouldPause,
+        runtimePaused: isConversationPaused(phoneId),
+      });
     } catch (err) {
       console.error('No se pudo actualizar el estado de la conversación', err);
       sendError(res, 500, 'No se pudo actualizar la conversación');

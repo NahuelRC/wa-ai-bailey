@@ -512,8 +512,7 @@ export async function iniciarWhatsApp() {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
-        console.log('Escaneá este QR para vincular tu sesión:');
-        qrcode.generate(qr, { small: true });
+        console.log('QR actualizado; consultalo desde el panel web.');
         try {
           await updateWhatsAppQr(qr);
         } catch (err) {
