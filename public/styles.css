@@ -430,6 +430,11 @@ body {
   color: #1f2937;
 }
 
+.conversation-user {
+  font-size: 0.85rem;
+  color: #475569;
+}
+
 .conversation-updated {
   font-size: 0.85rem;
   color: #64748b;

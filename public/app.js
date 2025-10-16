@@ -227,7 +227,8 @@ function applyConversationFilter(items) {
   const lower = term.toLowerCase();
   return items.filter(item => {
     const phone = item.phoneNumber || item.phone || '';
-    return phone.toLowerCase().includes(lower);
+    const userId = item.userId ? String(item.userId) : '';
+    return phone.toLowerCase().includes(lower) || userId.toLowerCase().includes(lower);
   });
 }
 
@@ -246,6 +247,7 @@ function renderConversations(items = []) {
   viewItems.forEach(item => {
     const row = document.createElement('div');
     row.className = 'conversation-item';
+    row.dataset.userId = item.userId ?? '';
 
     const info = document.createElement('div');
     info.className = 'conversation-info';
@@ -254,6 +256,13 @@ function renderConversations(items = []) {
     phoneEl.className = 'conversation-phone';
     phoneEl.textContent = item.phoneNumber || item.phone || 'Desconocido';
     info.appendChild(phoneEl);
+
+    if (item.userId) {
+      const userEl = document.createElement('div');
+      userEl.className = 'conversation-user';
+      userEl.textContent = `Usuario ${item.userId}`;
+      info.appendChild(userEl);
+    }
 
     const updatedEl = document.createElement('div');
     updatedEl.className = 'conversation-updated';
@@ -276,7 +285,8 @@ function renderConversations(items = []) {
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.className = 'conversation-toggle';
-    input.dataset.phone = item.phone;
+    input.dataset.phone = item.phone || '';
+    if (item.userId) input.dataset.userId = item.userId;
     input.checked = !item.paused;
     toggle.appendChild(input);
     const slider = document.createElement('span');
