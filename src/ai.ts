@@ -85,7 +85,9 @@ export type AiEnvelope = {
   order?: AiOrder; // ← opcional: sólo cuando se cierra la compra
 };
 
-export async function aiReply(userText: string, phone: string, history: string = '', userId?: string): Promise<AiEnvelope> {
+export type AiReplyResult = AiEnvelope & { userId: string };
+
+export async function aiReply(userText: string, phone: string, history: string = '', userId?: string): Promise<AiReplyResult> {
   const phoneKey = phone?.trim() ?? '';
   const sanitizedUserText = typeof userText === 'string' ? userText.trim() : '';
   const effectiveUserText = sanitizedUserText || userText || '';
@@ -209,5 +211,5 @@ ${historyForPrompt || '(sin historial)'}
     });
   }
 
-  return envelope;
+  return { ...envelope, userId: resolvedUserId };
 }

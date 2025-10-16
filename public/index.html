@@ -9,7 +9,7 @@
   <body>
     <div id="auth-view" class="auth-view">
       <div class="auth-card">
-        <div class="auth-brand">Ai Sales Pro</div>
+        <div class="auth-brand">Bedit.IA</div>
         <div class="auth-tabs">
           <button class="auth-tab active" data-tab="login">Iniciar sesión</button>
           <button class="auth-tab" data-tab="register">Crear cuenta</button>
@@ -45,7 +45,7 @@
         <div class="sidebar-header">
           <div class="brand-icon">🤖</div>
           <div class="brand-text">
-            <span class="brand-title">Ai Sales Pro</span>
+            <span class="brand-title">Bedit.IA</span>
             <span class="brand-sub">Panel de agentes</span>
           </div>
         </div>
@@ -61,6 +61,10 @@
           <button class="nav-item" data-view="conversations-view">
             <span class="nav-icon">💬</span>
             <span class="nav-text">Conversaciones</span>
+          </button>
+          <button class="nav-item" data-view="sales-view">
+            <span class="nav-icon">💵</span>
+            <span class="nav-text">Ventas</span>
           </button>
         </nav>
         <div class="sidebar-footer">
@@ -125,6 +129,39 @@
             </div>
           </section>
 
+          <section id="sales-view" class="view">
+            <div class="card sales-card">
+              <div class="card-header">
+                <div>
+                  <h2>Listado de ventas</h2>
+                  <p class="card-description">Consulta los pedidos registrados por tu agente.</p>
+                </div>
+                <button id="refresh-sales" class="secondary-button">Actualizar</button>
+              </div>
+              <div class="sales-summary-grid">
+                <div class="summary-card">
+                  <h3>Ventas del día</h3>
+                  <p id="sales-summary-day-amount" class="summary-amount">$0</p>
+                  <span id="sales-summary-day-count" class="summary-count">0 ventas</span>
+                </div>
+                <div class="summary-card">
+                  <h3>Ventas del mes</h3>
+                  <p id="sales-summary-month-amount" class="summary-amount">$0</p>
+                  <span id="sales-summary-month-count" class="summary-count">0 ventas</span>
+                </div>
+                <div class="summary-card">
+                  <h3>Ventas del año</h3>
+                  <p id="sales-summary-year-amount" class="summary-amount">$0</p>
+                  <span id="sales-summary-year-count" class="summary-count">0 ventas</span>
+                </div>
+              </div>
+              <div class="sales-table-wrapper">
+                <table id="sales-table"></table>
+              </div>
+              <p id="sales-empty" class="empty-state hidden">Aún no hay ventas registradas.</p>
+            </div>
+          </section>
+
           <section id="conversations-view" class="view">
             <div class="card conversations-card">
               <div class="card-header">
@@ -146,6 +183,54 @@
           </section>
         </main>
       </div>
+    </div>
+
+    <div id="sale-editor-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <form id="sale-editor-form" class="modal-dialog" autocomplete="off">
+        <div class="modal-header">
+          <div>
+            <h2>Editar venta</h2>
+            <p id="sale-editor-summary" class="modal-subtitle"></p>
+          </div>
+          <button type="button" id="sale-editor-close" class="modal-close" aria-label="Cerrar">x</button>
+        </div>
+        <div class="modal-body">
+          <label>
+            <span>Nombre</span>
+            <input type="text" id="sale-edit-nombre" />
+          </label>
+          <label>
+            <span>Producto</span>
+            <input type="text" id="sale-edit-producto" />
+          </label>
+          <label>
+            <span>Cantidad</span>
+            <input type="text" id="sale-edit-cantidad" />
+          </label>
+          <label>
+            <span>Dirección</span>
+            <input type="text" id="sale-edit-direccion" />
+          </label>
+          <label>
+            <span>Código Postal</span>
+            <input type="text" id="sale-edit-cp" />
+          </label>
+          <label>
+            <span>Ciudad</span>
+            <input type="text" id="sale-edit-ciudad" />
+          </label>
+          <label>
+            <span>Total (ARS)</span>
+            <input type="text" id="sale-edit-total" />
+          </label>
+          <p id="sale-editor-error" class="modal-error"></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="sale-editor-cancel" class="secondary-button">Cancelar</button>
+          <button type="submit" class="primary-button">Guardar cambios</button>
+        </div>
+      </form>
     </div>
 
     <template id="toast-template">

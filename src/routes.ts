@@ -19,6 +19,7 @@ import { iniciarWhatsApp, logoutWhatsApp, isConversationPaused, setConversationP
 import { ensureSystemPromptInitialized, loadSystemPrompt, saveSystemPrompt } from './promptStore.js';
 import { invalidateSystemPromptCache } from './ai.js';
 import { listConversationsForUser, getConversationForUser, setConversationPausedInDb } from './conversationStore.js';
+import { listSalesForUser, updateSaleForUser } from './salesStore.js';
 
 interface AuthenticatedRequest extends Request {
   authUserId?: string;
@@ -192,6 +193,74 @@ export function createRoutes() {
     } catch (err) {
       console.error('No se pudieron listar conversaciones', err);
       sendError(res, 500, 'No se pudieron listar las conversaciones');
+    }
+  });
+
+  app.get('/api/sales', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = req.authUser as StoredUser;
+      const sales = await listSalesForUser(user.id, 500);
+      res.json({ ok: true, sales });
+    } catch (err) {
+      console.error('No se pudieron listar ventas', err);
+      sendError(res, 500, 'No se pudieron listar las ventas');
+    }
+  });
+
+  app.put('/api/sales/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = req.authUser as StoredUser;
+      const saleId = String(req.params.id || '').trim();
+      if (!saleId) {
+        return sendError(res, 400, 'Venta inválida');
+      }
+
+      const body = req.body ?? {};
+      const updates: any = {};
+
+      const assignString = (key: string) => {
+        if (Object.prototype.hasOwnProperty.call(body, key)) {
+          const value = body[key];
+          updates[key] = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+        }
+      };
+
+      assignString('nombre');
+      assignString('producto');
+      assignString('cantidad');
+      assignString('direccion');
+      assignString('cp');
+      assignString('ciudad');
+
+      let totalInput: string | undefined;
+      if (Object.prototype.hasOwnProperty.call(body, 'total')) {
+        const val = body.total;
+        totalInput = typeof val === 'number' ? String(val) : String(val ?? '');
+      } else if (Object.prototype.hasOwnProperty.call(body, 'totalArsRaw')) {
+        totalInput = String(body.totalArsRaw ?? '');
+      }
+
+      if (totalInput !== undefined) {
+        const trimmed = totalInput.trim();
+        updates.totalArsRaw = trimmed;
+        const digits = trimmed.replace(/[^\d]/g, '');
+        updates.totalArs = digits ? Number(digits) : null;
+      } else if (Object.prototype.hasOwnProperty.call(body, 'totalArs') && typeof body.totalArs === 'number') {
+        updates.totalArs = Number.isFinite(body.totalArs) ? body.totalArs : null;
+        if (!Object.prototype.hasOwnProperty.call(updates, 'totalArsRaw')) {
+          updates.totalArsRaw = String(body.totalArs ?? '').trim();
+        }
+      }
+
+      const sale = await updateSaleForUser(user.id, saleId, updates);
+      if (!sale) {
+        return sendError(res, 404, 'Venta no encontrada');
+      }
+
+      res.json({ ok: true, sale });
+    } catch (err) {
+      console.error('No se pudo actualizar la venta', err);
+      sendError(res, 500, 'No se pudo actualizar la venta');
     }
   });
 
