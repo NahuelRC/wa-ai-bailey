@@ -11,6 +11,7 @@ import { aiReply } from './ai.js';
 import { promises as fsp } from 'fs';
 import { clearWhatsAppQr, updateWhatsAppQr } from './qrState.js';
 import { getAuthDir } from './sessionManager.js';
+import { insertSale } from './salesStore.js';
 
 // ====== Config de espera entre respuestas ======
 const REPLY_DELAY_MS = 1_000;
@@ -135,7 +136,7 @@ async function readLastNonEmptyLine(filePath: string): Promise<string | null> {
 }
 
 // Reemplazar tu appendOrderCsv por esta versión
-async function appendOrderCsv(row: Record<string, string>) {
+async function appendOrderCsv(row: Record<string, string>): Promise<boolean> {
   await ensureOrderCsv();
 
   // Normalizamos telefono (si no viene, lo intentamos construir desde chat_jid)
@@ -147,13 +148,12 @@ async function appendOrderCsv(row: Record<string, string>) {
   const iso = row['timestamp_iso'] || new Date().toISOString();
   row['timestamp_iso'] = iso;
   const hourKey = hourKeyFromIso(iso);
-  const memKey = `${telefono}:${hourKey}`;
 
   // 1) Dedupe en memoria (rápido)
   const lastMem = lastOrderKeyByPhone.get(telefono);
   if (lastMem === hourKey) {
     L('ORD_CSV_DEDUPE_MEM_SKIP', { telefono, hourKey });
-    return; // mismo tel + misma hora ya registrada en esta ejecución
+    return false; // mismo tel + misma hora ya registrada en esta ejecución
   }
 
   // 2) Dedupe por última línea del archivo (persistente)
@@ -169,7 +169,7 @@ async function appendOrderCsv(row: Record<string, string>) {
 
     if (lastTel && lastHourKey && lastTel === telefono && lastHourKey === hourKey) {
       L('ORD_CSV_DEDUPE_FILE_SKIP', { telefono, hourKey });
-      return; // mismo tel + misma hora ya persistido anteriormente
+      return false; // mismo tel + misma hora ya persistido anteriormente
     }
   }
 
@@ -182,6 +182,7 @@ async function appendOrderCsv(row: Record<string, string>) {
   await fsp.appendFile(ORDER_CSV_PATH, line, 'utf8');
   lastOrderKeyByPhone.set(telefono, hourKey);
   L('ORD_CSV_APPEND', { path: ORDER_CSV_PATH, telefono, hourKey });
+  return true;
 }
 
 
@@ -207,12 +208,24 @@ function isValidOrder(o: any): o is OrderPayload {
 
 function buildOrderJSON(jidRaw: string, order: OrderPayload) {
   const telefono = (jidRaw || '').replace(/\D+/g, '');
-  // normalizo total a número (opcional)
-  const totalNum = Number(String(order.total_ars ?? '').replace(/[^\d]/g, '')) || 0;
+  const total = extractTotalArs(order.total_ars);
   return {
     telefono,
-    total_ars: totalNum
+    total_ars: total.number ?? 0,
+    total_ars_raw: total.raw,
   };
+}
+
+function extractTotalArs(value: string | number | undefined): { raw: string; number?: number } {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return { raw: String(value), number: value };
+  }
+  const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  if (!raw) return { raw: '' };
+  const digits = raw.replace(/[^\d]/g, '');
+  if (!digits) return { raw };
+  const num = Number(digits);
+  return Number.isFinite(num) ? { raw, number: num } : { raw };
 }
 // ====== Anti-duplicados ======
 const processedIds = new Map<string, number>(); // id -> ts
@@ -424,22 +437,27 @@ async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: strin
   // ====== CSV por objeto "order" (si la IA lo provee) ======
   if (ai && ai.order && isValidOrder(ai.order)) {
     const telefono = phoneFromJid(jidRaw);
+    const timestampIso = new Date().toISOString();
+    const { raw: totalRaw, number: totalNumber } = extractTotalArs(ai.order.total_ars);
+    const rawText = textReply || combinedText;
+    const saleUserId = ai.userId?.trim() || 'global';
     const row = {
-      timestamp_iso: new Date().toISOString(),
+      timestamp_iso: timestampIso,
       chat_jid: jidRaw,
       telefono,
       nombre: String(ai.order.nombre ?? ''),
       producto: String(ai.order.producto ?? ''),
       cantidad: String(ai.order.cantidad ?? ''),
-      total_ars: String(ai.order.total_ars ?? ''),
+      total_ars: totalRaw,
       direccion: String(ai.order.direccion ?? ''),
       cp: String(ai.order.cp ?? ''),
       ciudad: String(ai.order.ciudad ?? ''),
-      //raw_text: textReply || combinedText
+      raw_text: rawText || '',
     };
     // >>> AQUI construimos el JSON pedido <<<
-  const orderJSON = buildOrderJSON(jidRaw, ai.order);
-  L('ORDER_JSON', orderJSON); // lo ves en logs
+    const orderJSON = buildOrderJSON(jidRaw, ai.order);
+    (orderJSON as any).user_id = saleUserId;
+    L('ORDER_JSON', orderJSON); // lo ves en logs
 
     // (Opcional) Enviarlo a tu BE por webhook
   // if (process.env.ORDER_WEBHOOK_URL) {
@@ -455,10 +473,32 @@ async function processBatch(sock: ReturnType<typeof makeWASocket>, jidRaw: strin
   //   }
   // }
     try {
-      await appendOrderCsv(row);
-      L('ORDER_FROM_OBJECT_OK', { jidRaw, row });
-      // Si querés, después de cerrar la compra podés limpiar historial:
-      // clearTranscript(jidRaw);
+      const appended = await appendOrderCsv(row);
+      if (appended) {
+        L('ORDER_FROM_OBJECT_OK', { jidRaw, row });
+        const saleSaved = await insertSale({
+          userId: saleUserId,
+          chatJid: jidRaw,
+          telefono,
+          timestamp: new Date(timestampIso),
+          nombre: row.nombre || undefined,
+          producto: row.producto || undefined,
+          cantidad: row.cantidad || undefined,
+          totalArs: totalNumber,
+          totalArsRaw: totalRaw,
+          direccion: row.direccion || undefined,
+          cp: row.cp || undefined,
+          ciudad: row.ciudad || undefined,
+          userMessage: combinedText || undefined,
+          aiMessage: textReply || undefined,
+          metadata: { dedupeHourKey: hourKeyFromIso(timestampIso), userId: saleUserId },
+        });
+        L('ORDER_SAVE_DB', { jidRaw, saleSaved, userId: saleUserId });
+        // Si querés, después de cerrar la compra podés limpiar historial:
+        // clearTranscript(jidRaw);
+      } else {
+        L('ORDER_FROM_OBJECT_DUP_SKIP', { jidRaw, telefono });
+      }
     } catch (e) {
       L('ORDER_FROM_OBJECT_ERR', { error: (e as Error)?.message });
     }
