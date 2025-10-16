@@ -296,7 +296,8 @@ async function loadConversations(force = false) {
   }
   conversationsLoading = true;
   try {
-    const { conversations } = await api('/api/conversations');
+    const fetchOptions = force ? { cache: 'no-store' } : undefined;
+    const { conversations } = await api('/api/conversations', fetchOptions);
     const items = Array.isArray(conversations) ? conversations : [];
     renderConversations(items);
   } catch (err) {
